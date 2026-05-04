@@ -21,19 +21,31 @@ option(DISPLAYXR_MCP_INSTALL "Install the lib + headers + adapter" ON)
 # ---------------------------------------------------------------- deps
 
 # cJSON: JSON parsing for the JSON-RPC dispatcher. Embedders typically
-# already have it (the runtime + shell-pvt do); we use the same vcpkg
-# port. Falls back to system cjson if find_package fails.
-find_package(cJSON CONFIG QUIET)
-if(NOT cJSON_FOUND)
-    find_path(CJSON_INCLUDE_DIR cjson/cJSON.h)
-    find_library(CJSON_LIBRARY NAMES cjson)
-    if(CJSON_INCLUDE_DIR AND CJSON_LIBRARY)
-        add_library(cjson UNKNOWN IMPORTED)
-        set_target_properties(cjson PROPERTIES
-            IMPORTED_LOCATION "${CJSON_LIBRARY}"
-            INTERFACE_INCLUDE_DIRECTORIES "${CJSON_INCLUDE_DIR}")
+# already have it (the runtime + shell-pvt do) — when we're added via
+# FetchContent into a parent project, reuse whatever target the parent
+# already configured. Otherwise discover it ourselves.
+if(TARGET cJSON::cJSON)
+    set(DISPLAYXR_MCP_CJSON_TARGET cJSON::cJSON)
+elseif(TARGET cjson)
+    set(DISPLAYXR_MCP_CJSON_TARGET cjson)
+else()
+    find_package(cJSON CONFIG QUIET)
+    if(TARGET cJSON::cJSON)
+        set(DISPLAYXR_MCP_CJSON_TARGET cJSON::cJSON)
+    elseif(TARGET cjson)
+        set(DISPLAYXR_MCP_CJSON_TARGET cjson)
     else()
-        message(FATAL_ERROR "displayxr_mcp requires cJSON (vcpkg: cjson, system: libcjson-dev)")
+        find_path(CJSON_INCLUDE_DIR cjson/cJSON.h)
+        find_library(CJSON_LIBRARY NAMES cjson)
+        if(CJSON_INCLUDE_DIR AND CJSON_LIBRARY)
+            add_library(cjson UNKNOWN IMPORTED)
+            set_target_properties(cjson PROPERTIES
+                IMPORTED_LOCATION "${CJSON_LIBRARY}"
+                INTERFACE_INCLUDE_DIRECTORIES "${CJSON_INCLUDE_DIR}")
+            set(DISPLAYXR_MCP_CJSON_TARGET cjson)
+        else()
+            message(FATAL_ERROR "displayxr_mcp requires cJSON (vcpkg: cjson, system: libcjson-dev)")
+        endif()
     endif()
 endif()
 
@@ -63,7 +75,7 @@ target_include_directories(displayxr_mcp
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 
 target_link_libraries(displayxr_mcp
-    PUBLIC cjson Threads::Threads)
+    PUBLIC ${DISPLAYXR_MCP_CJSON_TARGET} Threads::Threads)
 
 if(WIN32)
     # PIPE_PREFIX uses raw backslashes; nothing platform-specific to link
