@@ -30,9 +30,9 @@ jobs:
         if: matrix.os == 'macos-latest'
         run: brew install cjson ninja
 
-      - name: Install cJSON via vcpkg (Windows)
-        if: matrix.os == 'windows-latest'
-        run: vcpkg install cjson:x64-windows
+      # Windows uses vcpkg in manifest mode — the configure step picks
+      # vcpkg.json up via the toolchain file and installs cJSON
+      # automatically. No separate install step needed.
 
       - name: Configure (POSIX)
         if: matrix.os != 'windows-latest'
@@ -40,7 +40,7 @@ jobs:
 
       - name: Configure (Windows)
         if: matrix.os == 'windows-latest'
-        run: cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+        run: cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows
 
       - name: Build
         run: cmake --build build --config Release --parallel
