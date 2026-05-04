@@ -1,0 +1,95 @@
+# Copyright 2026, DisplayXR / Leia Inc.
+# SPDX-License-Identifier: BSL-1.0
+
+cmake_minimum_required(VERSION 3.21)
+
+project(displayxr_mcp
+    VERSION 0.2.0
+    DESCRIPTION "Tiny embeddable MCP (Model Context Protocol) server framework"
+    LANGUAGES C)
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_VISIBILITY_PRESET hidden)
+set(POSITION_INDEPENDENT_CODE ON)
+
+include(GNUInstallDirs)
+
+option(DISPLAYXR_MCP_BUILD_ADAPTER "Build the displayxr-mcp stdio↔socket adapter binary" ON)
+option(DISPLAYXR_MCP_INSTALL "Install the lib + headers + adapter" ON)
+
+# ---------------------------------------------------------------- deps
+
+# cJSON: JSON parsing for the JSON-RPC dispatcher. Embedders typically
+# already have it (the runtime + shell-pvt do); we use the same vcpkg
+# port. Falls back to system cjson if find_package fails.
+find_package(cJSON CONFIG QUIET)
+if(NOT cJSON_FOUND)
+    find_path(CJSON_INCLUDE_DIR cjson/cJSON.h)
+    find_library(CJSON_LIBRARY NAMES cjson)
+    if(CJSON_INCLUDE_DIR AND CJSON_LIBRARY)
+        add_library(cjson UNKNOWN IMPORTED)
+        set_target_properties(cjson PROPERTIES
+            IMPORTED_LOCATION "${CJSON_LIBRARY}"
+            INTERFACE_INCLUDE_DIRECTORIES "${CJSON_INCLUDE_DIR}")
+    else()
+        message(FATAL_ERROR "displayxr_mcp requires cJSON (vcpkg: cjson, system: libcjson-dev)")
+    endif()
+endif()
+
+# Threads: pthreads on POSIX, native pthread on Windows when available
+# (winpthreads / pthreads4w). Embedders that already link a pthread lib
+# should set Threads_FOUND themselves.
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+
+# ---------------------------------------------------------------- library
+
+set(DISPLAYXR_MCP_SOURCES
+    src/mcp_server.c
+    src/mcp_transport.c
+    src/mcp_capture.c
+    src/mcp_audit.c
+    src/mcp_allowlist.c
+    src/mcp_log_ring.c
+    src/os_compat.c)
+
+add_library(displayxr_mcp STATIC ${DISPLAYXR_MCP_SOURCES})
+add_library(displayxr_mcp::mcp ALIAS displayxr_mcp)
+
+target_include_directories(displayxr_mcp
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+
+target_link_libraries(displayxr_mcp
+    PUBLIC cjson Threads::Threads)
+
+if(WIN32)
+    # PIPE_PREFIX uses raw backslashes; nothing platform-specific to link
+    # beyond what's already on the link line via the Windows SDK.
+endif()
+
+# ---------------------------------------------------------------- adapter
+
+if(DISPLAYXR_MCP_BUILD_ADAPTER)
+    add_executable(displayxr_mcp_adapter adapter/displayxr_mcp.c)
+    add_executable(displayxr_mcp::adapter ALIAS displayxr_mcp_adapter)
+    set_target_properties(displayxr_mcp_adapter PROPERTIES
+        OUTPUT_NAME displayxr-mcp
+        PREFIX "")
+    target_link_libraries(displayxr_mcp_adapter PRIVATE displayxr_mcp)
+endif()
+
+# ---------------------------------------------------------------- install
+
+if(DISPLAYXR_MCP_INSTALL)
+    install(TARGETS displayxr_mcp EXPORT displayxr_mcp_targets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(DIRECTORY include/displayxr_mcp DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    if(DISPLAYXR_MCP_BUILD_ADAPTER)
+        install(TARGETS displayxr_mcp_adapter RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    endif()
+endif()
