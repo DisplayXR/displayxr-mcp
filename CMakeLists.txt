@@ -4,7 +4,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(displayxr_mcp
-    VERSION 0.2.1
+    VERSION 0.2.2
     DESCRIPTION "Tiny embeddable MCP (Model Context Protocol) server framework"
     LANGUAGES C)
 
@@ -49,11 +49,37 @@ else()
     endif()
 endif()
 
-# Threads: pthreads on POSIX, native pthread on Windows when available
-# (winpthreads / pthreads4w). Embedders that already link a pthread lib
-# should set Threads_FOUND themselves.
+# Threads: pthreads on POSIX. On Windows we don't have a system pthread
+# so we depend on vcpkg's `pthreads` port (declared in vcpkg.json) — it
+# provides pthread.h + a static lib MSVC can link. When this lib is
+# pulled into a parent project that already wired pthreads (e.g. the
+# runtime's xrt-pthreads target), reuse that target instead.
 set(THREADS_PREFER_PTHREAD_FLAG ON)
-find_package(Threads REQUIRED)
+if(WIN32)
+    if(TARGET xrt-pthreads)
+        # Runtime parent project already has its pthread shim wired.
+        set(DISPLAYXR_MCP_PTHREAD_TARGET xrt-pthreads)
+    elseif(TARGET PThreads4W::PThreads4W)
+        # vcpkg pthreads port name (modern).
+        set(DISPLAYXR_MCP_PTHREAD_TARGET PThreads4W::PThreads4W)
+    else()
+        find_package(PThreads4W CONFIG QUIET)
+        if(TARGET PThreads4W::PThreads4W)
+            set(DISPLAYXR_MCP_PTHREAD_TARGET PThreads4W::PThreads4W)
+        else()
+            # Last resort: the legacy pthreads_windows config target.
+            find_package(pthreads_windows CONFIG QUIET)
+            if(TARGET PThreads4W::PThreads4W)
+                set(DISPLAYXR_MCP_PTHREAD_TARGET PThreads4W::PThreads4W)
+            else()
+                message(FATAL_ERROR "displayxr_mcp on Windows requires vcpkg 'pthreads' (or the runtime's xrt-pthreads target).")
+            endif()
+        endif()
+    endif()
+else()
+    find_package(Threads REQUIRED)
+    set(DISPLAYXR_MCP_PTHREAD_TARGET Threads::Threads)
+endif()
 
 # ---------------------------------------------------------------- library
 
@@ -75,7 +101,7 @@ target_include_directories(displayxr_mcp
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 
 target_link_libraries(displayxr_mcp
-    PUBLIC ${DISPLAYXR_MCP_CJSON_TARGET} Threads::Threads)
+    PUBLIC ${DISPLAYXR_MCP_CJSON_TARGET} ${DISPLAYXR_MCP_PTHREAD_TARGET})
 
 if(WIN32)
     # PIPE_PREFIX uses raw backslashes; nothing platform-specific to link
