@@ -22,25 +22,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install cJSON (Linux)
+      - name: Install ninja (Linux)
         if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update && sudo apt-get install -y libcjson-dev ninja-build
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
 
-      - name: Install cJSON + ninja (macOS)
+      - name: Install ninja (macOS)
         if: matrix.os == 'macos-latest'
-        run: brew install cjson ninja
+        run: brew install ninja
 
       # Windows uses vcpkg in manifest mode — the configure step picks
-      # vcpkg.json up via the toolchain file and installs cJSON
-      # automatically. No separate install step needed.
+      # vcpkg.json up via the toolchain file and pulls pthreads
+      # automatically. cJSON is vendored in external/cjson/ so it does
+      # not need a system install on any platform.
 
       - name: Configure (POSIX)
         if: matrix.os != 'windows-latest'
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        # Force the vendored cJSON path so we exercise the same code
+        # consumers without a system cJSON will hit (e.g. macOS CI of
+        # downstream projects).
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DDISPLAYXR_MCP_USE_VENDORED_CJSON=ON -DDISPLAYXR_MCP_BUILD_TESTS=ON
 
       - name: Configure (Windows)
         if: matrix.os == 'windows-latest'
-        run: cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows
+        run: cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows -DDISPLAYXR_MCP_USE_VENDORED_CJSON=ON
 
       - name: Build
         run: cmake --build build --config Release --parallel
+
+      - name: Test (POSIX)
+        if: matrix.os != 'windows-latest'
+        run: ctest --test-dir build --output-on-failure

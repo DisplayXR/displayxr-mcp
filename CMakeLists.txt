@@ -4,7 +4,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(displayxr_mcp
-    VERSION 0.2.2
+    VERSION 0.2.3
     DESCRIPTION "Tiny embeddable MCP (Model Context Protocol) server framework"
     LANGUAGES C)
 
@@ -17,36 +17,47 @@ include(GNUInstallDirs)
 
 option(DISPLAYXR_MCP_BUILD_ADAPTER "Build the displayxr-mcp stdio↔socket adapter binary" ON)
 option(DISPLAYXR_MCP_INSTALL "Install the lib + headers + adapter" ON)
+option(DISPLAYXR_MCP_BUILD_TESTS "Build the framework smoke test (ctest target)" OFF)
 
 # ---------------------------------------------------------------- deps
 
-# cJSON: JSON parsing for the JSON-RPC dispatcher. Embedders typically
-# already have it (the runtime + shell-pvt do) — when we're added via
-# FetchContent into a parent project, reuse whatever target the parent
-# already configured. Otherwise discover it ourselves.
-if(TARGET cJSON::cJSON)
-    set(DISPLAYXR_MCP_CJSON_TARGET cJSON::cJSON)
-elseif(TARGET cjson)
-    set(DISPLAYXR_MCP_CJSON_TARGET cjson)
-else()
-    find_package(cJSON CONFIG QUIET)
+# cJSON: JSON parsing for the JSON-RPC dispatcher. Detection chain:
+#   1. Parent project already has a cJSON::cJSON or cjson target → reuse.
+#   2. find_package(cJSON CONFIG) succeeds → use it.
+#   3. Fall back to the vendored copy in external/cjson/ — keeps the
+#      framework self-contained on hosts without a system cJSON.
+#
+# The vendored copy is the upstream cJSON with CJSON_HIDE_SYMBOLS so it
+# never collides at link time with another consumer's cJSON.
+option(DISPLAYXR_MCP_USE_VENDORED_CJSON "Force use of the vendored cJSON copy under external/cjson/" OFF)
+
+if(NOT DISPLAYXR_MCP_USE_VENDORED_CJSON)
     if(TARGET cJSON::cJSON)
         set(DISPLAYXR_MCP_CJSON_TARGET cJSON::cJSON)
     elseif(TARGET cjson)
         set(DISPLAYXR_MCP_CJSON_TARGET cjson)
     else()
-        find_path(CJSON_INCLUDE_DIR cjson/cJSON.h)
-        find_library(CJSON_LIBRARY NAMES cjson)
-        if(CJSON_INCLUDE_DIR AND CJSON_LIBRARY)
-            add_library(cjson UNKNOWN IMPORTED)
-            set_target_properties(cjson PROPERTIES
-                IMPORTED_LOCATION "${CJSON_LIBRARY}"
-                INTERFACE_INCLUDE_DIRECTORIES "${CJSON_INCLUDE_DIR}")
+        find_package(cJSON CONFIG QUIET)
+        if(TARGET cJSON::cJSON)
+            set(DISPLAYXR_MCP_CJSON_TARGET cJSON::cJSON)
+        elseif(TARGET cjson)
             set(DISPLAYXR_MCP_CJSON_TARGET cjson)
-        else()
-            message(FATAL_ERROR "displayxr_mcp requires cJSON (vcpkg: cjson, system: libcjson-dev)")
         endif()
     endif()
+endif()
+
+if(NOT DEFINED DISPLAYXR_MCP_CJSON_TARGET)
+    # Vendored fallback — compile cJSON.c into a small static lib with
+    # symbols hidden so we don't conflict with any other cJSON the
+    # parent (or any sibling sub-project) may ship.
+    add_library(displayxr_mcp_vendored_cjson STATIC external/cjson/cJSON.c)
+    target_include_directories(displayxr_mcp_vendored_cjson SYSTEM
+        PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/external>)
+    target_compile_definitions(displayxr_mcp_vendored_cjson PUBLIC CJSON_HIDE_SYMBOLS)
+    set_target_properties(displayxr_mcp_vendored_cjson PROPERTIES
+        C_VISIBILITY_PRESET hidden
+        POSITION_INDEPENDENT_CODE ON)
+    set(DISPLAYXR_MCP_CJSON_TARGET displayxr_mcp_vendored_cjson)
 endif()
 
 # Threads: pthreads on POSIX. On Windows we don't have a system pthread
@@ -117,6 +128,18 @@ if(DISPLAYXR_MCP_BUILD_ADAPTER)
         OUTPUT_NAME displayxr-mcp
         PREFIX "")
     target_link_libraries(displayxr_mcp_adapter PRIVATE displayxr_mcp)
+endif()
+
+# ---------------------------------------------------------------- tests
+
+if(DISPLAYXR_MCP_BUILD_TESTS)
+    if(NOT DISPLAYXR_MCP_BUILD_ADAPTER)
+        message(FATAL_ERROR "DISPLAYXR_MCP_BUILD_TESTS requires DISPLAYXR_MCP_BUILD_ADAPTER (the smoke test forks the adapter as a subprocess).")
+    endif()
+    enable_testing()
+    add_executable(displayxr_mcp_smoke tests/smoke_test.c)
+    target_link_libraries(displayxr_mcp_smoke PRIVATE displayxr_mcp)
+    add_test(NAME smoke COMMAND displayxr_mcp_smoke $<TARGET_FILE:displayxr_mcp_adapter>)
 endif()
 
 # ---------------------------------------------------------------- install
