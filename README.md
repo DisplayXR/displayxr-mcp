@@ -57,11 +57,25 @@ static const struct mcp_tool MY_TOOL = {
 
 int main(void)
 {
-    setenv("DISPLAYXR_MCP", "1", 1); // or set externally
     mcp_server_register_tool(&MY_TOOL);
-    mcp_server_maybe_start_named("my-app"); // \\.\pipe\displayxr-mcp-my-app
-    // run forever; the server thread is detached
-    pause();
+
+    // Two API styles for starting the server:
+    //
+    //   mcp_server_start_named(role)        — unconditional. Caller owns
+    //                                          the policy gate.
+    //   mcp_server_maybe_start_named(role)  — gated on DISPLAYXR_MCP
+    //                                          env var. Convenience.
+    //
+    // For a registry / config / env-var hybrid, use mcp_check_env_or:
+    //
+    //   bool fallback = my_capability_enabled();   // your gate
+    //   if (mcp_check_env_or(fallback)) {          // env var still wins
+    //       mcp_server_start_named("my-app");      // \\.\pipe\displayxr-mcp-my-app
+    //   }
+
+    setenv("DISPLAYXR_MCP", "1", 1);   // or set externally
+    mcp_server_maybe_start_named("my-app");
+    pause();   // server thread is detached
 }
 ```
 
@@ -86,6 +100,33 @@ void my_log_sink(int level, const char *fmt, va_list args)
     // ... your own destinations (stderr, file, etc.) ...
 }
 ```
+
+## Windows installer
+
+The repo also ships an NSIS installer (`DisplayXRMCPSetup-X.Y.Z.exe`)
+built by CI on tag pushes. The installer:
+
+- Drops `displayxr-mcp.exe` at `C:\Program Files\DisplayXR\MCP\bin\`.
+- Writes `HKLM\Software\DisplayXR\Capabilities\MCP\{Enabled, AdapterPath, Version}`.
+- Cleanly uninstalls via Add/Remove Programs.
+
+The DisplayXR runtime + shell read this registry key at their startup
+to decide whether to spawn their MCP server thread (`Capabilities\<name>`
+is the sibling extension point to `WorkspaceControllers\<name>`). Two
+results: agent control becomes a 3rd installer that's discoverable and
+opt-in, *and* the `DISPLAYXR_MCP` env var still works as an override
+for dev / CI workflows (see `mcp_check_env_or` above).
+
+To build the installer locally on Windows:
+
+```bat
+cmake -S . -B build -DDISPLAYXR_MCP_BUILD_INSTALLER=ON
+cmake --build build --config Release
+:: produces build/installer/DisplayXRMCPSetup-X.Y.Z.0.exe
+```
+
+NSIS must be on `PATH`; the GitHub Actions windows-latest runner ships
+it preinstalled at `C:\Program Files (x86)\NSIS\`.
 
 ## Spec
 

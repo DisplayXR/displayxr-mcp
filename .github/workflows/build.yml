@@ -12,6 +12,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: write   # for the release-attach step on tag pushes
+
 jobs:
   build:
     strategy:
@@ -33,7 +36,9 @@ jobs:
       # Windows uses vcpkg in manifest mode — the configure step picks
       # vcpkg.json up via the toolchain file and pulls pthreads
       # automatically. cJSON is vendored in external/cjson/ so it does
-      # not need a system install on any platform.
+      # not need a system install on any platform. NSIS for the
+      # installer ships with windows-latest by default at
+      # C:\Program Files (x86)\NSIS\.
 
       - name: Configure (POSIX)
         if: matrix.os != 'windows-latest'
@@ -44,11 +49,40 @@ jobs:
 
       - name: Configure (Windows)
         if: matrix.os == 'windows-latest'
-        run: cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows -DDISPLAYXR_MCP_USE_VENDORED_CJSON=ON
+        # Build the installer too — cheap, NSIS is preinstalled, and on
+        # tag pushes we attach it to the release. BUILD_NUM uses the
+        # GitHub Actions run number for traceability on non-tag builds.
+        run: |
+          $installerArg = "-DDISPLAYXR_MCP_BUILD_INSTALLER=ON -DBUILD_NUM=${{ github.run_number }}"
+          $installerPath = "C:\Program Files (x86)\NSIS"
+          $env:PATH = "$env:PATH;$installerPath"
+          cmake -S . -B build `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows `
+            -DDISPLAYXR_MCP_USE_VENDORED_CJSON=ON `
+            -DDISPLAYXR_MCP_BUILD_INSTALLER=ON `
+            "-DBUILD_NUM=${{ github.run_number }}"
 
       - name: Build
         run: cmake --build build --config Release --parallel
+        shell: bash
 
       - name: Test (POSIX)
         if: matrix.os != 'windows-latest'
         run: ctest --test-dir build --output-on-failure
+
+      - name: Upload installer artifact (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: DisplayXRMCPSetup
+          path: build/installer/DisplayXRMCPSetup-*.exe
+          retention-days: 14
+
+      # On tag pushes attach the installer to the GitHub Release.
+      - name: Attach installer to release (tag push only)
+        if: matrix.os == 'windows-latest' && startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/installer/DisplayXRMCPSetup-*.exe
+          fail_on_unmatched_files: true
