@@ -36,9 +36,13 @@ jobs:
       # Windows uses vcpkg in manifest mode — the configure step picks
       # vcpkg.json up via the toolchain file and pulls pthreads
       # automatically. cJSON is vendored in external/cjson/ so it does
-      # not need a system install on any platform. NSIS for the
-      # installer ships with windows-latest by default at
-      # C:\Program Files (x86)\NSIS\.
+      # not need a system install on any platform.
+      - name: Install NSIS (Windows)
+        if: matrix.os == 'windows-latest'
+        # NSIS is not preinstalled on windows-latest; chocolatey IS.
+        # NSIS lands at C:\Program Files (x86)\NSIS\ and choco's shim
+        # adds makensis to PATH. ~30 s install.
+        run: choco install nsis -y --no-progress
 
       - name: Configure (POSIX)
         if: matrix.os != 'windows-latest'
@@ -49,13 +53,11 @@ jobs:
 
       - name: Configure (Windows)
         if: matrix.os == 'windows-latest'
-        # Build the installer too — cheap, NSIS is preinstalled, and on
-        # tag pushes we attach it to the release. BUILD_NUM uses the
-        # GitHub Actions run number for traceability on non-tag builds.
+        # Build the installer too — cheap once NSIS is on PATH (above).
+        # On tag pushes we attach the .exe to the release. BUILD_NUM
+        # uses the GitHub Actions run number for traceability on non-
+        # tag builds.
         run: |
-          $installerArg = "-DDISPLAYXR_MCP_BUILD_INSTALLER=ON -DBUILD_NUM=${{ github.run_number }}"
-          $installerPath = "C:\Program Files (x86)\NSIS"
-          $env:PATH = "$env:PATH;$installerPath"
           cmake -S . -B build `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
             -DVCPKG_TARGET_TRIPLET=x64-windows `
