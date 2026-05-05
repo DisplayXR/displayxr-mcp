@@ -4,7 +4,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(displayxr_mcp
-    VERSION 0.2.3
+    VERSION 0.3.0
     DESCRIPTION "Tiny embeddable MCP (Model Context Protocol) server framework"
     LANGUAGES C)
 
@@ -18,6 +18,7 @@ include(GNUInstallDirs)
 option(DISPLAYXR_MCP_BUILD_ADAPTER "Build the displayxr-mcp stdio↔socket adapter binary" ON)
 option(DISPLAYXR_MCP_INSTALL "Install the lib + headers + adapter" ON)
 option(DISPLAYXR_MCP_BUILD_TESTS "Build the framework smoke test (ctest target)" OFF)
+option(DISPLAYXR_MCP_BUILD_INSTALLER "Build the Windows NSIS installer (DisplayXRMCPSetup-*.exe). Requires NSIS + adapter binary." OFF)
 
 # ---------------------------------------------------------------- deps
 
@@ -153,4 +154,47 @@ if(DISPLAYXR_MCP_INSTALL)
     if(DISPLAYXR_MCP_BUILD_ADAPTER)
         install(TARGETS displayxr_mcp_adapter RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
     endif()
+endif()
+
+# ---------------------------------------------------------------- installer (Windows)
+#
+# The installer ships displayxr-mcp.exe + writes
+# HKLM\Software\DisplayXR\Capabilities\MCP, which the runtime + shell
+# read at startup to decide whether to spawn their MCP server thread.
+# Built only when explicitly requested (CI tag jobs); needs makensis on
+# PATH and the adapter binary already built.
+if(DISPLAYXR_MCP_BUILD_INSTALLER)
+    if(NOT WIN32)
+        message(FATAL_ERROR "DISPLAYXR_MCP_BUILD_INSTALLER is Windows-only.")
+    endif()
+    if(NOT DISPLAYXR_MCP_BUILD_ADAPTER)
+        message(FATAL_ERROR "DISPLAYXR_MCP_BUILD_INSTALLER requires DISPLAYXR_MCP_BUILD_ADAPTER.")
+    endif()
+    find_program(MAKENSIS makensis REQUIRED)
+
+    set(DXRMCP_INSTALLER_OUT_DIR "${CMAKE_BINARY_DIR}/installer")
+    file(MAKE_DIRECTORY "${DXRMCP_INSTALLER_OUT_DIR}")
+
+    set(DXRMCP_INSTALLER_OUTPUT
+        "${DXRMCP_INSTALLER_OUT_DIR}/DisplayXRMCPSetup-${PROJECT_VERSION}.${BUILD_NUM}.exe")
+
+    if(NOT DEFINED BUILD_NUM)
+        set(BUILD_NUM 0)
+    endif()
+
+    add_custom_target(displayxr_mcp_installer ALL
+        COMMAND ${MAKENSIS}
+            -V2
+            -DVERSION=${PROJECT_VERSION}
+            -DVERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+            -DVERSION_MINOR=${PROJECT_VERSION_MINOR}
+            -DVERSION_PATCH=${PROJECT_VERSION_PATCH}
+            -DBUILD_NUM=${BUILD_NUM}
+            -DBIN_DIR=$<TARGET_FILE_DIR:displayxr_mcp_adapter>
+            -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+            -DOUTPUT_DIR=${DXRMCP_INSTALLER_OUT_DIR}
+            ${CMAKE_CURRENT_SOURCE_DIR}/installer/DisplayXRMCPInstaller.nsi
+        DEPENDS displayxr_mcp_adapter
+        COMMENT "Building DisplayXR MCP Tools installer (NSIS)"
+        VERBATIM)
 endif()

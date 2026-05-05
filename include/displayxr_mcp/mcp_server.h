@@ -46,25 +46,65 @@ struct mcp_tool
 };
 
 /*!
- * Start the server if @c DISPLAYXR_MCP is set, bound to a per-PID socket.
- * Idempotent no-op if already running or env var unset. Best-effort:
- * failure logs MCP_LOG_W and returns without aborting instance creation.
+ * Unconditionally start the server bound to a per-PID socket. The caller
+ * is responsible for the policy gate (registry / env var / config).
+ * Idempotent no-op if already running. Best-effort: failure logs and
+ * returns without aborting.
  *
- * Used by handle apps that link @c libopenxr_displayxr in-process.
+ * Used by handle apps that link the framework in-process.
+ */
+void
+mcp_server_start(void);
+
+/*!
+ * Unconditionally start the server bound to a well-known named socket
+ * (`/tmp/displayxr-mcp-<role>.sock` on POSIX,
+ * `\\.\pipe\displayxr-mcp-<role>` on Windows). Idempotent.
+ *
+ * Used by singleton processes (e.g. @c displayxr-shell.exe) where the
+ * adapter discovers the endpoint by role rather than PID. Pair with
+ * @ref mcp_check_env_or for the standard env-var-overrides-default
+ * gating policy.
+ */
+void
+mcp_server_start_named(const char *role);
+
+/*!
+ * Convenience wrapper: start the per-PID server iff @c DISPLAYXR_MCP env
+ * var is set to a non-zero value. Equivalent to
+ * `if (mcp_check_env_or(false)) mcp_server_start();`. Kept for back-
+ * compat with consumers from before the registry-based gate landed.
  */
 void
 mcp_server_maybe_start(void);
 
 /*!
- * Start the server if @c DISPLAYXR_MCP is set, bound to a well-known
- * named socket (`/tmp/displayxr-mcp-<role>.sock` on POSIX,
- * `\\.\pipe\displayxr-mcp-<role>` on Windows). Idempotent.
- *
- * Used by singleton processes like @c displayxr-service where the adapter
- * should be able to discover the endpoint by role rather than PID.
+ * Convenience wrapper: start the named server iff @c DISPLAYXR_MCP env
+ * var is set to a non-zero value. Equivalent to
+ * `if (mcp_check_env_or(false)) mcp_server_start_named(role);`. Kept
+ * for back-compat with consumers from before the registry-based gate
+ * landed.
  */
 void
 mcp_server_maybe_start_named(const char *role);
+
+/*!
+ * Read the @c DISPLAYXR_MCP env var as an explicit override.
+ *
+ * - Var set to a non-zero, non-empty value (`"1"`, `"true"`, …) → returns @c true.
+ * - Var set to `"0"` or empty string → returns @c false (force-disable).
+ * - Var unset → returns @p fallback.
+ *
+ * Consumers that want their own primary gate (e.g. a Windows registry
+ * lookup under @c HKLM\Software\DisplayXR\Capabilities\MCP) call this
+ * with the registry verdict as @p fallback so the env var still wins
+ * when explicitly set:
+ *
+ *   bool registry = win32_capability_mcp_enabled();
+ *   if (mcp_check_env_or(registry)) mcp_server_start_named("shell");
+ */
+bool
+mcp_check_env_or(bool fallback);
 
 /*!
  * Stop the server (joins the thread, unlinks the socket). Safe to call

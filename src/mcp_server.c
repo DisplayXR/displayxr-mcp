@@ -439,11 +439,20 @@ start_with_listener(struct mcp_listener *listener, const char *endpoint_label)
 	MCP_LOG_I(LOG_PFX "server started (%s)", endpoint_label);
 }
 
-static bool
-mcp_enabled(void)
+bool
+mcp_check_env_or(bool fallback)
 {
 	const char *flag = getenv("DISPLAYXR_MCP");
-	return flag != NULL && flag[0] != '\0' && flag[0] != '0';
+	if (flag == NULL) {
+		return fallback;
+	}
+	// Explicit override: empty or leading '0' force-disables; anything
+	// else force-enables. Symmetric with the historical mcp_enabled()
+	// semantics so consumers that pre-date this API don't change.
+	if (flag[0] == '\0' || flag[0] == '0') {
+		return false;
+	}
+	return true;
 }
 
 static void
@@ -460,9 +469,9 @@ register_builtins(void)
 }
 
 void
-mcp_server_maybe_start(void)
+mcp_server_start(void)
 {
-	if (g_server.thread_started || !mcp_enabled()) {
+	if (g_server.thread_started) {
 		return;
 	}
 	register_builtins();
@@ -478,9 +487,9 @@ mcp_server_maybe_start(void)
 }
 
 void
-mcp_server_maybe_start_named(const char *role)
+mcp_server_start_named(const char *role)
 {
-	if (g_server.thread_started || !mcp_enabled()) {
+	if (g_server.thread_started) {
 		return;
 	}
 	if (role == NULL || role[0] == '\0') {
@@ -497,6 +506,22 @@ mcp_server_maybe_start_named(const char *role)
 	char label[96];
 	snprintf(label, sizeof(label), "role=%s pid=%ld", role, (long)mcp_self_pid());
 	start_with_listener(listener, label);
+}
+
+void
+mcp_server_maybe_start(void)
+{
+	if (mcp_check_env_or(false)) {
+		mcp_server_start();
+	}
+}
+
+void
+mcp_server_maybe_start_named(const char *role)
+{
+	if (mcp_check_env_or(false)) {
+		mcp_server_start_named(role);
+	}
 }
 
 void
