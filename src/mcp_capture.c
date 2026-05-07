@@ -40,7 +40,7 @@ mcp_capture_fini(struct mcp_capture_request *req)
 }
 
 bool
-mcp_capture_blocking_handler(const char *path, void *userdata)
+mcp_capture_blocking_handler(const char *path, uint32_t mode, void *userdata)
 {
 	struct mcp_capture_request *req = userdata;
 	if (req == NULL || path == NULL) {
@@ -54,6 +54,7 @@ mcp_capture_blocking_handler(const char *path, void *userdata)
 	}
 	memcpy(req->path, path, n);
 	req->path[n] = '\0';
+	req->mode = mode;
 	req->pending = true;
 	req->done = false;
 	req->success = false;
@@ -118,12 +119,15 @@ mcp_capture_get_installed(void)
 }
 
 bool
-mcp_capture_poll(struct mcp_capture_request *req, char *out_path)
+mcp_capture_poll(struct mcp_capture_request *req, char *out_path, uint32_t *out_mode)
 {
 	pthread_mutex_lock(&req->lock);
 	bool pending = req->pending && !req->done;
 	if (pending) {
 		memcpy(out_path, req->path, sizeof(req->path));
+		if (out_mode != NULL) {
+			*out_mode = req->mode;
+		}
 	}
 	pthread_mutex_unlock(&req->lock);
 	return pending;

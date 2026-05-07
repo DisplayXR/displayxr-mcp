@@ -21,6 +21,7 @@
 
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -28,11 +29,31 @@ extern "C" {
 
 #define MCP_CAPTURE_PATH_MAX 256
 
+/*!
+ * Selects what state of the atlas is captured.
+ *
+ * - POST_COMPOSE (default): the atlas the compositor hands to the
+ *   display processor — projection layers + window-space (HUD) + quads,
+ *   composed across every tile. Useful for "what does the DP see?".
+ * - PROJECTION_ONLY: the atlas with only projection-class layers
+ *   (XR_TYPE_COMPOSITION_LAYER_PROJECTION{,_DEPTH} and quads). Useful
+ *   for verifying tile-aware app rendering independent of chrome.
+ *
+ * Wire-format value is stable; compositors switch on it to pick the
+ * capture call site.
+ */
+enum mcp_capture_mode
+{
+	MCP_CAPTURE_MODE_POST_COMPOSE = 0,
+	MCP_CAPTURE_MODE_PROJECTION_ONLY = 1,
+};
+
 struct mcp_capture_request
 {
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
 	char path[MCP_CAPTURE_PATH_MAX];
+	uint32_t mode; // enum mcp_capture_mode
 	bool pending;
 	bool done;
 	bool success;
@@ -59,12 +80,16 @@ mcp_capture_uninstall(void);
 
 /*!
  * Check for a pending request. Returns true if one is in flight and
- * fills @p out_path (must be at least @c MCP_CAPTURE_PATH_MAX bytes).
- * Caller must follow up with @ref mcp_capture_complete after the PNG
- * is written (or failed).
+ * fills @p out_path (must be at least @c MCP_CAPTURE_PATH_MAX bytes)
+ * and @p out_mode (one of @ref mcp_capture_mode). @p out_mode may be
+ * NULL if the caller only handles a single mode. Caller must follow
+ * up with @ref mcp_capture_complete after the PNG is written (or
+ * failed).
  */
 bool
-mcp_capture_poll(struct mcp_capture_request *req, char *out_path);
+mcp_capture_poll(struct mcp_capture_request *req,
+                  char *out_path,
+                  uint32_t *out_mode);
 
 /*!
  * Signal the waiting MCP thread.
@@ -82,11 +107,14 @@ mcp_capture_get_installed(void);
 
 /*!
  * Blocking handler for the Phase A per-PID capture_frame tool. Submits
- * a capture request and waits (up to 3 s) for the compositor thread to
- * complete it. Called from the oxr tool_capture_frame handler.
+ * a capture request with the requested @p mode and waits (up to 3 s)
+ * for the compositor thread to complete it. Called from the oxr
+ * tool_capture_frame handler.
  */
 bool
-mcp_capture_blocking_handler(const char *path, void *userdata);
+mcp_capture_blocking_handler(const char *path,
+                              uint32_t mode,
+                              void *userdata);
 
 typedef void (*mcp_capture_notify_fn)(void *req);
 
