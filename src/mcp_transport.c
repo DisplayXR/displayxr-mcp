@@ -200,6 +200,15 @@ mcp_conn_close(struct mcp_conn *conn)
 		return;
 	}
 	if (conn->fd >= 0) {
+		// shutdown() before close() unblocks any thread currently
+		// inside read()/write() on this fd — the adapter's down pump
+		// thread is one such caller, and the server thread's read in
+		// serve() is another. On macOS close() alone happens to wake
+		// the reader; on Linux it does NOT (POSIX leaves this
+		// undefined and Linux keeps the underlying socket alive
+		// until the in-flight syscall returns), which is why the
+		// Linux CI smoke test hung forever in pthread_join.
+		(void)shutdown(conn->fd, SHUT_RDWR);
 		close(conn->fd);
 	}
 	free(conn);
