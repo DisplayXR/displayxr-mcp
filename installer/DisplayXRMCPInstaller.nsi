@@ -180,9 +180,14 @@ Section "Uninstall"
 	; Capability key — drop the entire subkey so the runtime + shell
 	; both see the capability go away on next launch.
 	DeleteRegKey HKLM "Software\DisplayXR\Capabilities\MCP"
-	; Don't DeleteRegKey /ifempty on Capabilities itself or the parent
-	; — runtime / future Capabilities\<name> entries may still own
-	; siblings.
+	; Prune the Capabilities and DisplayXR parents only if no siblings
+	; (other Capabilities\<name> or other DisplayXR\<component> entries)
+	; remain. /ifempty is the safe form — it's a no-op if subkeys exist.
+	; Without this, `reg query HKLM\Software\DisplayXR` after a full
+	; orchestrator --uninstall returns an empty Capabilities parent
+	; instead of the expected "key not found".
+	DeleteRegKey /ifempty HKLM "Software\DisplayXR\Capabilities"
+	DeleteRegKey /ifempty HKLM "Software\DisplayXR"
 
 	DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\DisplayXRMCP"
 SectionEnd
