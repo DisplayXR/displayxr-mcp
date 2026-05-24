@@ -12,7 +12,7 @@ Schema, handler) and the framework dispatches them.
 Used by:
 
 - [DisplayXR runtime](https://github.com/DisplayXR/displayxr-runtime) — Phase A handle-app introspection (per-PID server in each app process).
-- [DisplayXR Shell](https://github.com/DisplayXR/displayxr-shell-pvt) — Phase B workspace control (per-shell-process server).
+- [DisplayXR Shell](https://github.com/DisplayXR/displayxr-shell-releases) — Phase B workspace control (per-shell-process server).
 - Any third-party DisplayXR workspace controller that wants to expose an agent surface.
 
 ## Consuming via CMake FetchContent
