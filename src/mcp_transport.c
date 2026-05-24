@@ -417,7 +417,17 @@ mcp_listener_close(struct mcp_listener *listener)
 	}
 	InterlockedExchange(&listener->closed, 1);
 	if (listener->pipe != INVALID_HANDLE_VALUE) {
-		// Unblock any thread waiting in ConnectNamedPipe / ReadFile.
+		// The server thread is parked in synchronous ConnectNamedPipe
+		// on this handle (the listener pipe is created without
+		// FILE_FLAG_OVERLAPPED). On Windows, CloseHandle from another
+		// thread does NOT wake a synchronous ConnectNamedPipe — the
+		// kernel keeps the I/O parked and pthread_join in
+		// mcp_server_stop deadlocks. CancelIoEx cancels any pending
+		// I/O on the handle from any thread; the parked
+		// ConnectNamedPipe returns with ERROR_OPERATION_ABORTED and
+		// the server thread exits cleanly. DisconnectNamedPipe alone
+		// is a no-op when no client is connected.
+		CancelIoEx(listener->pipe, NULL);
 		DisconnectNamedPipe(listener->pipe);
 		CloseHandle(listener->pipe);
 	}
@@ -483,6 +493,13 @@ mcp_conn_close(struct mcp_conn *conn)
 		return;
 	}
 	if (conn->pipe != INVALID_HANDLE_VALUE) {
+		// Cancel any in-flight ReadFile/WriteFile a sibling thread
+		// may have parked on this handle. The per-connection I/O on
+		// Windows uses OVERLAPPED, so CloseHandle would eventually
+		// complete the wait, but CancelIoEx makes it deterministic
+		// and avoids waiting on a remote client that has gone silent
+		// without sending FIN.
+		CancelIoEx(conn->pipe, NULL);
 		if (conn->owns_handle) {
 			CloseHandle(conn->pipe);
 		} else {
