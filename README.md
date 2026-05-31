@@ -101,23 +101,41 @@ void my_log_sink(int level, const char *fmt, va_list args)
 }
 ```
 
-## Windows installer
+## Installers
 
-The repo also ships an NSIS installer (`DisplayXRMCPSetup-X.Y.Z.exe`)
-built by CI on tag pushes. The installer:
+CI builds a Windows installer (`DisplayXRMCPSetup-X.Y.Z.exe`) and a
+macOS package (`DisplayXRMCP-X.Y.Z.pkg`) on tag pushes and attaches
+both to the GitHub Release.
+
+### Windows — `DisplayXRMCPSetup-*.exe` (NSIS)
 
 - Drops `displayxr-mcp.exe` at `C:\Program Files\DisplayXR\MCP\bin\`.
 - Writes `HKLM\Software\DisplayXR\Capabilities\MCP\{Enabled, AdapterPath, Version}`.
 - Cleanly uninstalls via Add/Remove Programs.
 
-The DisplayXR runtime + shell read this registry key at their startup
-to decide whether to spawn their MCP server thread (`Capabilities\<name>`
-is the sibling extension point to `WorkspaceControllers\<name>`). Two
-results: agent control becomes a 3rd installer that's discoverable and
-opt-in, *and* the `DISPLAYXR_MCP` env var still works as an override
-for dev / CI workflows (see `mcp_check_env_or` above).
+### macOS — `DisplayXRMCP-*.pkg` (productbuild)
 
-To build the installer locally on Windows:
+- Drops `displayxr-mcp` at `/usr/local/bin/`.
+- Stages `AdapterPath` + `Version` text files at
+  `/Library/Application Support/DisplayXR/Capabilities/MCP/`.
+- Postinstall writes a single byte `1` to `…/Capabilities/MCP/Enabled`
+  (root:wheel 0644). The runtime + shell read the first byte of this
+  file at startup — the POSIX mirror of the Windows REG_DWORD gate.
+- Uninstall via the bundled `installer/macos/uninstall.sh`.
+
+### How the gate composes
+
+The DisplayXR runtime + shell read the capability marker (registry on
+Windows, file on macOS) at their startup to decide whether to spawn
+their MCP server thread (`Capabilities\<name>` is the sibling extension
+point to `WorkspaceControllers\<name>`). Two results: agent control
+becomes a separate installer that's discoverable and opt-in, *and* the
+`DISPLAYXR_MCP` env var still works as an override for dev / CI
+workflows (see `mcp_check_env_or` above).
+
+### Building installers locally
+
+Windows:
 
 ```bat
 cmake -S . -B build -DDISPLAYXR_MCP_BUILD_INSTALLER=ON
@@ -127,6 +145,17 @@ cmake --build build --config Release
 
 NSIS must be on `PATH`; the GitHub Actions windows-latest runner ships
 it preinstalled at `C:\Program Files (x86)\NSIS\`.
+
+macOS:
+
+```bash
+cmake -S . -B build -G Ninja -DDISPLAYXR_MCP_BUILD_MACOS_INSTALLER=ON
+cmake --build build
+# produces build/installer/DisplayXRMCP-X.Y.Z.pkg
+```
+
+`pkgbuild` + `productbuild` ship with the Xcode Command Line Tools (and
+are preinstalled on the GitHub Actions macos-latest runner).
 
 ## Spec
 

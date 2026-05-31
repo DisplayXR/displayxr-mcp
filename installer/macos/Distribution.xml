@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>DisplayXR MCP Tools</title>
+    <organization>com.displayxr</organization>
+    <os-version min="13.0" />
+    <license file="LICENSE" />
+    <welcome file="welcome.html" />
+    <choices-outline>
+        <line choice="mcp" />
+    </choices-outline>
+    <choice id="mcp" visible="true" start_selected="true" enabled="false"
+        title="DisplayXR MCP Tools"
+        description="Adapter binary + capability flag so the DisplayXR runtime (and shell, when present) expose MCP servers for agent / voice control. Installs /usr/local/bin/displayxr-mcp and writes /Library/Application Support/DisplayXR/Capabilities/MCP/. The DisplayXR runtime is a soft prereq — without it there are no MCP servers to attach to, but installing this first is fine: the capability flips on as soon as the runtime is present.">
+        <pkg-ref id="com.displayxr.mcp" />
+    </choice>
+    <pkg-ref id="com.displayxr.mcp" version="1.0" onConclusion="none">mcp.pkg</pkg-ref>
+</installer-gui-script>
