@@ -1,0 +1,26 @@
+#!/bin/bash
+# Post-install: flip the MCP capability bit on.
+#
+# Discovery contract (mirror of HKLM\Software\DisplayXR\Capabilities\MCP\Enabled
+# on Windows): runtime + shell read the first byte of this file at
+# startup. '1' → MCP servers spawn; anything else (or file missing) → off.
+# Combine with the DISPLAYXR_MCP env var (mcp_check_env_or) for dev /
+# CI overrides.
+#
+# Why postinstall instead of staging the byte in the payload: pkgbuild
+# captures ownership + mode from the staging tree, which on a dev host
+# would record the staging user as the file owner. Writing here as
+# root guarantees root:wheel 0644 regardless of who ran build_installer.sh.
+
+set -e
+
+CAP_DIR="/Library/Application Support/DisplayXR/Capabilities/MCP"
+mkdir -p "$CAP_DIR"
+
+# Single byte '1' — read() of first byte == '1' is the gate predicate
+# on the runtime side (matches the Win32 REG_DWORD == 1 check).
+printf '1' > "$CAP_DIR/Enabled"
+chmod 0644 "$CAP_DIR/Enabled"
+chown root:wheel "$CAP_DIR/Enabled"
+
+exit 0

@@ -19,6 +19,7 @@ option(DISPLAYXR_MCP_BUILD_ADAPTER "Build the displayxr-mcp stdio↔socket adapt
 option(DISPLAYXR_MCP_INSTALL "Install the lib + headers + adapter" ON)
 option(DISPLAYXR_MCP_BUILD_TESTS "Build the framework smoke test (ctest target)" OFF)
 option(DISPLAYXR_MCP_BUILD_INSTALLER "Build the Windows NSIS installer (DisplayXRMCPSetup-*.exe). Requires NSIS + adapter binary." OFF)
+option(DISPLAYXR_MCP_BUILD_MACOS_INSTALLER "Build the macOS .pkg installer (DisplayXRMCP-*.pkg). Requires pkgbuild + productbuild + adapter binary." OFF)
 
 # ---------------------------------------------------------------- deps
 
@@ -196,5 +197,40 @@ if(DISPLAYXR_MCP_BUILD_INSTALLER)
             ${CMAKE_CURRENT_SOURCE_DIR}/installer/DisplayXRMCPInstaller.nsi
         DEPENDS displayxr_mcp_adapter
         COMMENT "Building DisplayXR MCP Tools installer (NSIS)"
+        VERBATIM)
+endif()
+
+# ---------------------------------------------------------------- installer (macOS)
+#
+# The .pkg ships /usr/local/bin/displayxr-mcp + writes the capability
+# marker tree at /Library/Application Support/DisplayXR/Capabilities/MCP/
+# (postinstall flips Enabled to '1'). The runtime + shell read the same
+# marker on POSIX that they read from HKLM\Software\DisplayXR\Capabilities\MCP
+# on Windows. Built only when explicitly requested (CI tag jobs); needs
+# pkgbuild + productbuild (Xcode CLT) and the adapter binary already built.
+if(DISPLAYXR_MCP_BUILD_MACOS_INSTALLER)
+    if(NOT APPLE)
+        message(FATAL_ERROR "DISPLAYXR_MCP_BUILD_MACOS_INSTALLER is macOS-only.")
+    endif()
+    if(NOT DISPLAYXR_MCP_BUILD_ADAPTER)
+        message(FATAL_ERROR "DISPLAYXR_MCP_BUILD_MACOS_INSTALLER requires DISPLAYXR_MCP_BUILD_ADAPTER.")
+    endif()
+    find_program(PKGBUILD pkgbuild REQUIRED)
+    find_program(PRODUCTBUILD productbuild REQUIRED)
+
+    set(DXRMCP_INSTALLER_OUT_DIR "${CMAKE_BINARY_DIR}/installer")
+    file(MAKE_DIRECTORY "${DXRMCP_INSTALLER_OUT_DIR}")
+
+    set(DXRMCP_MACOS_PKG
+        "${DXRMCP_INSTALLER_OUT_DIR}/DisplayXRMCP-${PROJECT_VERSION}.pkg")
+
+    add_custom_target(displayxr_mcp_installer_macos ALL
+        COMMAND ${CMAKE_COMMAND} -E env
+            DISPLAYXR_VERSION=${PROJECT_VERSION}
+            bash ${CMAKE_CURRENT_SOURCE_DIR}/installer/macos/build_installer.sh
+            $<TARGET_FILE:displayxr_mcp_adapter>
+            ${DXRMCP_MACOS_PKG}
+        DEPENDS displayxr_mcp_adapter
+        COMMENT "Building DisplayXR MCP Tools installer (macOS .pkg)"
         VERBATIM)
 endif()

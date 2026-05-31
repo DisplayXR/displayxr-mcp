@@ -47,8 +47,8 @@ jobs:
           choco install nsis -y --no-progress
           "C:\Program Files (x86)\NSIS" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      - name: Configure (POSIX)
-        if: matrix.os != 'windows-latest'
+      - name: Configure (Linux)
+        if: matrix.os == 'ubuntu-latest'
         # Force the vendored cJSON path so we exercise the same code
         # consumers without a system cJSON will hit (e.g. macOS CI of
         # downstream projects).
@@ -94,6 +94,42 @@ jobs:
           Set-Content -Path CMakeLists.txt -Value $out -Encoding UTF8
           Select-String -Path CMakeLists.txt -Pattern '^\s*VERSION\s+\d+\.\d+\.\d+\s*$' | Select-Object -First 1
 
+      # macOS parallel of the Windows sync step above. The .pkg filename
+      # is `DisplayXRMCP-${PROJECT_VERSION}.pkg` so the same drift hazard
+      # applies — without this, tag-push builds attach a stale-versioned
+      # .pkg to the GitHub Release.
+      - name: Sync CMake VERSION from latest vX.Y.Z tag (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          set -euo pipefail
+          # actions/checkout default fetch-depth=1 skips tags — pull
+          # just the tag refs.
+          git fetch --depth=1 origin '+refs/tags/*:refs/tags/*' 2>/dev/null || true
+
+          tag=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)
+          if [ -z "$tag" ]; then
+            echo "No vX.Y.Z tag reachable — leaving CMakeLists.txt unchanged"
+            exit 0
+          fi
+          if ! [[ "$tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "Latest tag '$tag' is not vX.Y.Z — leaving CMakeLists.txt unchanged"
+            exit 0
+          fi
+          ver="${BASH_REMATCH[1]}"
+          echo "Patching CMakeLists.txt VERSION to $ver (from tag $tag, ref=$GITHUB_REF)"
+          # macOS sed needs `-i ''` for in-place. Match the same line shape
+          # as the pwsh regex above: `<indent>VERSION X.Y.Z<trailing>`.
+          sed -i '' -E "s/^([[:space:]]*)VERSION[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+([[:space:]]*)$/\1VERSION ${ver}\2/" CMakeLists.txt
+          grep -nE '^[[:space:]]*VERSION[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$' CMakeLists.txt | head -1
+
+      - name: Configure (macOS)
+        if: matrix.os == 'macos-latest'
+        # Build the .pkg too so PRs catch installer regressions, not just
+        # tag pushes. pkgbuild + productbuild ship with Xcode CLT (always
+        # installed on the GHA macos-* runners). Same cJSON-vendored path
+        # as Linux above.
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DDISPLAYXR_MCP_USE_VENDORED_CJSON=ON -DDISPLAYXR_MCP_BUILD_TESTS=ON -DDISPLAYXR_MCP_BUILD_MACOS_INSTALLER=ON
+
       - name: Configure (Windows)
         if: matrix.os == 'windows-latest'
         # Build the installer too — cheap once NSIS is on PATH (above).
@@ -116,6 +152,31 @@ jobs:
         if: matrix.os != 'windows-latest'
         run: ctest --test-dir build --output-on-failure
 
+      # Regression guard against shipping a .pkg that's missing the
+      # adapter binary or the capability marker files. Mirrors the
+      # displayxr-runtime #274 assertion pattern (sim-display plug-in +
+      # manifest must both be present).
+      - name: Assert macOS .pkg payload
+        if: matrix.os == 'macos-latest'
+        run: |
+          set -euo pipefail
+          PKG=$(ls build/installer/DisplayXRMCP-*.pkg | head -1)
+          test -n "$PKG" || { echo "ERROR: no DisplayXRMCP-*.pkg in build/installer/" >&2; exit 1; }
+          EXPAND="$(mktemp -d)"
+          pkgutil --expand "$PKG" "$EXPAND/pkg"
+          # Payload listing → check three required files + postinstall.
+          FILES="$(gunzip -dc "$EXPAND/pkg/mcp.pkg/Payload" | cpio -t 2>/dev/null)"
+          echo "$FILES" | grep -qE '^\./usr/local/bin/displayxr-mcp$' \
+            || { echo "ERROR: payload missing /usr/local/bin/displayxr-mcp" >&2; exit 1; }
+          echo "$FILES" | grep -qE '^\./Library/Application Support/DisplayXR/Capabilities/MCP/AdapterPath$' \
+            || { echo "ERROR: payload missing Capabilities/MCP/AdapterPath" >&2; exit 1; }
+          echo "$FILES" | grep -qE '^\./Library/Application Support/DisplayXR/Capabilities/MCP/Version$' \
+            || { echo "ERROR: payload missing Capabilities/MCP/Version" >&2; exit 1; }
+          test -f "$EXPAND/pkg/mcp.pkg/Scripts/postinstall" \
+            || { echo "ERROR: postinstall script not bundled (no Scripts/postinstall)" >&2; exit 1; }
+          echo "✓ .pkg payload assertions passed"
+          rm -rf "$EXPAND"
+
       - name: Upload installer artifact (Windows)
         if: matrix.os == 'windows-latest'
         uses: actions/upload-artifact@v4
@@ -124,12 +185,27 @@ jobs:
           path: build/installer/DisplayXRMCPSetup-*.exe
           retention-days: 14
 
+      - name: Upload installer artifact (macOS)
+        if: matrix.os == 'macos-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: DisplayXRMCP-macOS
+          path: build/installer/DisplayXRMCP-*.pkg
+          retention-days: 14
+
       # On tag pushes attach the installer to the GitHub Release.
-      - name: Attach installer to release (tag push only)
+      - name: Attach installer to release (Windows tag push)
         if: matrix.os == 'windows-latest' && startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: build/installer/DisplayXRMCPSetup-*.exe
+          fail_on_unmatched_files: true
+
+      - name: Attach installer to release (macOS tag push)
+        if: matrix.os == 'macos-latest' && startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/installer/DisplayXRMCP-*.pkg
           fail_on_unmatched_files: true
 
   # On v* tag push, after the matrix build succeeds, tell

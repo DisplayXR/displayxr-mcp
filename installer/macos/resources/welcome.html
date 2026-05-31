@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>DisplayXR MCP Tools</title>
+<style>
+body { font: 13px -apple-system, sans-serif; margin: 1em 2em; color: #222; }
+h1 { font-size: 1.3em; margin-bottom: 0.4em; }
+p { line-height: 1.45; }
+.note { background: #f5f5f0; border-left: 3px solid #c4a200; padding: 0.6em 0.9em; margin: 1em 0; }
+code { background: #eee; padding: 0 4px; border-radius: 3px; }
+</style>
+</head>
+<body>
+<h1>DisplayXR MCP Tools</h1>
+<p>
+Installs <code>displayxr-mcp</code>, the stdio↔socket adapter for the
+<strong>Model Context Protocol</strong>, into
+<code>/usr/local/bin/</code>, and flips on the <strong>MCP capability</strong>
+flag the DisplayXR runtime (and shell, when present) reads at startup.
+Once installed, the runtime spawns a per-PID MCP server that AI agents
+and voice clients can attach to for runtime introspection.
+</p>
+<p>
+The capability marker lands at
+<code>/Library/Application Support/DisplayXR/Capabilities/MCP/</code>;
+removing or rewriting <code>Enabled</code> to anything other than
+<code>1</code> disables MCP without uninstalling the adapter.
+</p>
+<div class="note">
+<strong>Soft prereq:</strong> the <strong>DisplayXR runtime</strong> is the
+producer of MCP endpoints — without it, the adapter has nothing to attach
+to. Installing this first is fine; the capability flips on as soon as the
+runtime is present. The <code>DISPLAYXR_MCP</code> env var continues to
+work as a dev / CI force-enable override.
+</div>
+</body>
+</html>
