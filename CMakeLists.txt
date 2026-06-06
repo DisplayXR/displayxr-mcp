@@ -116,6 +116,10 @@ target_include_directories(displayxr_mcp
 target_link_libraries(displayxr_mcp
     PUBLIC ${DISPLAYXR_MCP_CJSON_TARGET} ${DISPLAYXR_MCP_PTHREAD_TARGET})
 
+# Surfaced in the MCP initialize response (serverInfo.version).
+target_compile_definitions(displayxr_mcp
+    PRIVATE DISPLAYXR_MCP_VERSION="${PROJECT_VERSION}")
+
 if(WIN32)
     # PIPE_PREFIX uses raw backslashes; nothing platform-specific to link
     # beyond what's already on the link line via the Windows SDK.
@@ -124,12 +128,16 @@ endif()
 # ---------------------------------------------------------------- adapter
 
 if(DISPLAYXR_MCP_BUILD_ADAPTER)
-    add_executable(displayxr_mcp_adapter adapter/displayxr_mcp.c)
+    add_executable(displayxr_mcp_adapter
+        adapter/displayxr_mcp.c
+        adapter/workspace_aggregator.c)
     add_executable(displayxr_mcp::adapter ALIAS displayxr_mcp_adapter)
     set_target_properties(displayxr_mcp_adapter PROPERTIES
         OUTPUT_NAME displayxr-mcp
         PREFIX "")
     target_link_libraries(displayxr_mcp_adapter PRIVATE displayxr_mcp)
+    target_compile_definitions(displayxr_mcp_adapter
+        PRIVATE DISPLAYXR_MCP_VERSION="${PROJECT_VERSION}")
 endif()
 
 # ---------------------------------------------------------------- tests
@@ -142,6 +150,10 @@ if(DISPLAYXR_MCP_BUILD_TESTS)
     add_executable(displayxr_mcp_smoke tests/smoke_test.c)
     target_link_libraries(displayxr_mcp_smoke PRIVATE displayxr_mcp)
     add_test(NAME smoke COMMAND displayxr_mcp_smoke $<TARGET_FILE:displayxr_mcp_adapter>)
+
+    add_executable(displayxr_mcp_v040 tests/v040_test.c)
+    target_link_libraries(displayxr_mcp_v040 PRIVATE displayxr_mcp)
+    add_test(NAME v040 COMMAND displayxr_mcp_v040 $<TARGET_FILE:displayxr_mcp_adapter>)
 endif()
 
 # ---------------------------------------------------------------- install

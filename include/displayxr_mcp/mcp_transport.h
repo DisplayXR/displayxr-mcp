@@ -76,6 +76,16 @@ bool
 mcp_conn_write(struct mcp_conn *conn, const void *buf, size_t len);
 
 /*!
+ * Abort the connection: wake any thread blocked in mcp_conn_read /
+ * mcp_conn_write on it (they return false) and make all subsequent
+ * I/O on it fail. Does NOT free — ownership stays with whoever calls
+ * mcp_conn_close. Safe to call from any thread; the multi-client
+ * server uses it at stop to unwind per-connection serve threads.
+ */
+void
+mcp_conn_abort(struct mcp_conn *conn);
+
+/*!
  * Close and free the connection.
  */
 void

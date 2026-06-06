@@ -28,8 +28,26 @@
 #endif
 
 #define LOG_PFX "[mcp] "
-#define MAX_TOOLS 32
+#define MAX_TOOLS 64
+#define MAX_CONNS 8
 #define MAX_FRAME_BYTES (4 * 1024 * 1024)
+
+#ifndef DISPLAYXR_MCP_VERSION
+#define DISPLAYXR_MCP_VERSION "0.4.0-dev"
+#endif
+
+/*!
+ * One connected client. Slots are owned by the conns_mutex; the serve
+ * thread clears its own slot on exit. write_mutex serializes response
+ * writes (serve thread) against notification broadcasts (any thread).
+ */
+struct mcp_client
+{
+	struct mcp_conn *conn;       //!< NULL = free slot.
+	pthread_t thread;
+	bool initialized;            //!< Saw `initialize` — eligible for notifications.
+	pthread_mutex_t write_mutex;
+};
 
 struct mcp_server
 {
@@ -40,10 +58,18 @@ struct mcp_server
 	pthread_mutex_t tools_mutex;
 	const struct mcp_tool *tools[MAX_TOOLS];
 	size_t tool_count;
+	char app_id[33]; //!< Manifest `id` slug; empty = unset.
+
+	pthread_mutex_t conns_mutex;
+	struct mcp_client clients[MAX_CONNS];
+	size_t active_clients;
+	pthread_cond_t conns_drained; //!< Signaled when active_clients hits 0.
 };
 
 static struct mcp_server g_server = {
     .tools_mutex = PTHREAD_MUTEX_INITIALIZER,
+    .conns_mutex = PTHREAD_MUTEX_INITIALIZER,
+    .conns_drained = PTHREAD_COND_INITIALIZER,
 };
 
 // ---------- Frame I/O (Content-Length framing, LSP/MCP style) ----------
@@ -157,6 +183,48 @@ jsonrpc_error(const cJSON *id, int code, const char *message)
 	return out;
 }
 
+// ---------- Notifications ----------
+
+/*!
+ * Send a JSON-RPC notification to every initialized client. Tolerates
+ * write failures (the client's serve thread notices the dead conn on
+ * its next read and unwinds the slot).
+ */
+static void
+broadcast_notification(const char *method)
+{
+	cJSON *env = cJSON_CreateObject();
+	cJSON_AddStringToObject(env, "jsonrpc", "2.0");
+	cJSON_AddStringToObject(env, "method", method);
+	char *body = cJSON_PrintUnformatted(env);
+	cJSON_Delete(env);
+	if (body == NULL) {
+		return;
+	}
+
+	pthread_mutex_lock(&g_server.conns_mutex);
+	for (size_t i = 0; i < MAX_CONNS; i++) {
+		struct mcp_client *cl = &g_server.clients[i];
+		if (cl->conn == NULL || !cl->initialized) {
+			continue;
+		}
+		pthread_mutex_lock(&cl->write_mutex);
+		(void)write_frame(cl->conn, body);
+		pthread_mutex_unlock(&cl->write_mutex);
+	}
+	pthread_mutex_unlock(&g_server.conns_mutex);
+	free(body);
+}
+
+static void
+notify_tools_changed(void)
+{
+	if (!g_server.thread_started) {
+		return; // Pre-start registration: nothing to notify yet.
+	}
+	broadcast_notification("notifications/tools/list_changed");
+}
+
 // ---------- Tool registry ----------
 
 static const struct mcp_tool *
@@ -180,13 +248,89 @@ mcp_server_register_tool(const struct mcp_tool *tool)
 	if (tool == NULL || tool->name == NULL || tool->fn == NULL) {
 		return;
 	}
+	bool added = false;
 	pthread_mutex_lock(&g_server.tools_mutex);
 	if (g_server.tool_count < MAX_TOOLS) {
 		g_server.tools[g_server.tool_count++] = tool;
+		added = true;
 	} else {
 		MCP_LOG_W(LOG_PFX "tool registry full; dropping '%s'", tool->name);
 	}
 	pthread_mutex_unlock(&g_server.tools_mutex);
+	if (added) {
+		notify_tools_changed();
+	}
+}
+
+void
+mcp_server_unregister_tool(const char *name)
+{
+	if (name == NULL) {
+		return;
+	}
+	bool removed = false;
+	pthread_mutex_lock(&g_server.tools_mutex);
+	for (size_t i = 0; i < g_server.tool_count; i++) {
+		if (strcmp(g_server.tools[i]->name, name) != 0) {
+			continue;
+		}
+		// Order is presentation-only; shift to keep tools/list stable-ish.
+		memmove(&g_server.tools[i], &g_server.tools[i + 1],
+		        (g_server.tool_count - i - 1) * sizeof(g_server.tools[0]));
+		g_server.tool_count--;
+		removed = true;
+		break;
+	}
+	pthread_mutex_unlock(&g_server.tools_mutex);
+	if (removed) {
+		notify_tools_changed();
+	}
+}
+
+/*!
+ * Validate an app id slug: ^[a-z0-9][a-z0-9-]{0,31}$ — mirrors the
+ * manifest spec. Underscores are excluded by design ('__' is the
+ * aggregator's namespace separator).
+ */
+static bool
+app_id_valid(const char *id)
+{
+	if (id == NULL || id[0] == '\0') {
+		return false;
+	}
+	size_t len = strlen(id);
+	if (len > 32) {
+		return false;
+	}
+	for (size_t i = 0; i < len; i++) {
+		char c = id[i];
+		bool alnum = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+		if (i == 0 ? !alnum : !(alnum || c == '-')) {
+			return false;
+		}
+	}
+	return true;
+}
+
+void
+mcp_server_set_app_id(const char *app_id)
+{
+	if (!app_id_valid(app_id)) {
+		MCP_LOG_W(LOG_PFX "ignoring invalid app id '%s'", app_id ? app_id : "(null)");
+		return;
+	}
+	bool changed = false;
+	pthread_mutex_lock(&g_server.tools_mutex);
+	if (strcmp(g_server.app_id, app_id) != 0) {
+		snprintf(g_server.app_id, sizeof(g_server.app_id), "%s", app_id);
+		changed = true;
+	}
+	pthread_mutex_unlock(&g_server.tools_mutex);
+	if (changed) {
+		// The id rides tools/list _meta; a list_changed makes consumers
+		// (the workspace aggregator) re-read it and re-prefix.
+		notify_tools_changed();
+	}
 }
 
 // ---------- Built-in echo tool (slice 1 handshake check) ----------
@@ -275,6 +419,18 @@ static const struct mcp_tool ECHO_TOOL = {
 
 // ---------- MCP protocol methods ----------
 
+static const char *
+group_name(enum mcp_tool_group group)
+{
+	switch (group) {
+	case MCP_TOOL_GROUP_APP: return "app";
+	case MCP_TOOL_GROUP_WORKSPACE: return "workspace";
+	case MCP_TOOL_GROUP_CAPTURE: return "capture";
+	case MCP_TOOL_GROUP_DIAGNOSTIC:
+	default: return "diagnostic";
+	}
+}
+
 static cJSON *
 build_tools_list(void)
 {
@@ -293,6 +449,9 @@ build_tools_list(void)
 				cJSON_AddItemToObject(e, "inputSchema", schema);
 			}
 		}
+		cJSON *meta = cJSON_CreateObject();
+		cJSON_AddStringToObject(meta, "displayxr/group", group_name(t->group));
+		cJSON_AddItemToObject(e, "_meta", meta);
 		cJSON_AddItemToArray(arr, e);
 	}
 	pthread_mutex_unlock(&g_server.tools_mutex);
@@ -300,7 +459,7 @@ build_tools_list(void)
 }
 
 static char *
-handle_request(const cJSON *req)
+handle_request(const cJSON *req, struct mcp_client *client)
 {
 	const cJSON *method_node = cJSON_GetObjectItemCaseSensitive(req, "method");
 	const cJSON *id = cJSON_GetObjectItemCaseSensitive(req, "id");
@@ -322,13 +481,24 @@ handle_request(const cJSON *req)
 		cJSON_AddStringToObject(result, "protocolVersion", "2024-11-05");
 		cJSON *caps = cJSON_CreateObject();
 		cJSON *tools_cap = cJSON_CreateObject();
-		cJSON_AddBoolToObject(tools_cap, "listChanged", false);
+		cJSON_AddBoolToObject(tools_cap, "listChanged", true);
 		cJSON_AddItemToObject(caps, "tools", tools_cap);
 		cJSON_AddItemToObject(result, "capabilities", caps);
 		cJSON *info = cJSON_CreateObject();
 		cJSON_AddStringToObject(info, "name", "displayxr-mcp");
-		cJSON_AddStringToObject(info, "version", "0.2.0-phase-a");
+		cJSON_AddStringToObject(info, "version", DISPLAYXR_MCP_VERSION);
+		pthread_mutex_lock(&g_server.tools_mutex);
+		if (g_server.app_id[0] != '\0') {
+			cJSON_AddStringToObject(info, "appId", g_server.app_id);
+		}
+		pthread_mutex_unlock(&g_server.tools_mutex);
 		cJSON_AddItemToObject(result, "serverInfo", info);
+		// Mark the client notification-eligible only once it has done
+		// the MCP handshake — pre-initialize notifications confuse
+		// strict clients.
+		if (client != NULL) {
+			client->initialized = true;
+		}
 		return jsonrpc_result(id, result);
 	}
 
@@ -339,6 +509,15 @@ handle_request(const cJSON *req)
 	if (strcmp(method, "tools/list") == 0) {
 		cJSON *result = cJSON_CreateObject();
 		cJSON_AddItemToObject(result, "tools", build_tools_list());
+		// Result-level _meta carries the app id so consumers that joined
+		// before xrSetMCPAppInfoEXT ran can re-read it on list_changed.
+		pthread_mutex_lock(&g_server.tools_mutex);
+		if (g_server.app_id[0] != '\0') {
+			cJSON *meta = cJSON_CreateObject();
+			cJSON_AddStringToObject(meta, "displayxr/appId", g_server.app_id);
+			cJSON_AddItemToObject(result, "_meta", meta);
+		}
+		pthread_mutex_unlock(&g_server.tools_mutex);
 		return jsonrpc_result(id, result);
 	}
 
@@ -378,13 +557,13 @@ handle_request(const cJSON *req)
 // ---------- Per-connection serve loop ----------
 
 static void
-serve(struct mcp_conn *conn)
+serve(struct mcp_client *client)
 {
 	for (;;) {
 		size_t len = 0;
-		char *body = read_frame(conn, &len);
+		char *body = read_frame(client->conn, &len);
 		if (body == NULL) {
-			return; // EOF or framing error.
+			return; // EOF, abort, or framing error.
 		}
 		cJSON *req = cJSON_ParseWithLength(body, len);
 		free(body);
@@ -393,17 +572,43 @@ serve(struct mcp_conn *conn)
 		if (req == NULL) {
 			reply = jsonrpc_error(NULL, -32700, "parse error");
 		} else {
-			reply = handle_request(req);
+			reply = handle_request(req, client);
 			cJSON_Delete(req);
 		}
 		if (reply != NULL) {
-			if (!write_frame(conn, reply)) {
-				free(reply);
+			// Serialize against notification broadcasts from other threads.
+			pthread_mutex_lock(&client->write_mutex);
+			bool ok = write_frame(client->conn, reply);
+			pthread_mutex_unlock(&client->write_mutex);
+			free(reply);
+			if (!ok) {
 				return;
 			}
-			free(reply);
 		}
 	}
+}
+
+static void *
+client_thread(void *arg)
+{
+	struct mcp_client *client = arg;
+	serve(client);
+
+	// Unwind the slot. Broadcasters hold conns_mutex while writing, so
+	// once the slot is cleared nobody else touches the conn and the
+	// close/free here is safe.
+	pthread_mutex_lock(&g_server.conns_mutex);
+	struct mcp_conn *conn = client->conn;
+	client->conn = NULL;
+	client->initialized = false;
+	pthread_detach(client->thread);
+	g_server.active_clients--;
+	if (g_server.active_clients == 0) {
+		pthread_cond_broadcast(&g_server.conns_drained);
+	}
+	pthread_mutex_unlock(&g_server.conns_mutex);
+	mcp_conn_close(conn);
+	return NULL;
 }
 
 // ---------- Thread entry ----------
@@ -417,8 +622,33 @@ server_thread(void *arg)
 		if (c == NULL) {
 			return NULL; // listener closed.
 		}
-		serve(c);
-		mcp_conn_close(c);
+
+		pthread_mutex_lock(&g_server.conns_mutex);
+		struct mcp_client *slot = NULL;
+		for (size_t i = 0; i < MAX_CONNS; i++) {
+			if (g_server.clients[i].conn == NULL) {
+				slot = &g_server.clients[i];
+				break;
+			}
+		}
+		if (slot == NULL) {
+			pthread_mutex_unlock(&g_server.conns_mutex);
+			MCP_LOG_W(LOG_PFX "client limit (%d) reached; rejecting connection", MAX_CONNS);
+			mcp_conn_close(c);
+			continue;
+		}
+		slot->conn = c;
+		slot->initialized = false;
+		int rc = pthread_create(&slot->thread, NULL, client_thread, slot);
+		if (rc != 0) {
+			MCP_LOG_W(LOG_PFX "client pthread_create failed: %s", strerror(rc));
+			slot->conn = NULL;
+			pthread_mutex_unlock(&g_server.conns_mutex);
+			mcp_conn_close(c);
+			continue;
+		}
+		g_server.active_clients++;
+		pthread_mutex_unlock(&g_server.conns_mutex);
 	}
 }
 
@@ -427,6 +657,16 @@ server_thread(void *arg)
 static void
 start_with_listener(struct mcp_listener *listener, const char *endpoint_label)
 {
+	// One-time init of the per-slot write mutexes (slots are static
+	// storage; PTHREAD_MUTEX_INITIALIZER can't reach array members).
+	static bool slots_init = false;
+	if (!slots_init) {
+		for (size_t i = 0; i < MAX_CONNS; i++) {
+			pthread_mutex_init(&g_server.clients[i].write_mutex, NULL);
+		}
+		slots_init = true;
+	}
+
 	g_server.listener = listener;
 	int rc = pthread_create(&g_server.thread, NULL, server_thread, NULL);
 	if (rc != 0) {
@@ -530,9 +770,25 @@ mcp_server_stop(void)
 	if (!g_server.thread_started) {
 		return;
 	}
+	// 1. Stop accepting (wakes the accept thread).
 	mcp_listener_close(g_server.listener);
 	g_server.listener = NULL;
 	pthread_join(g_server.thread, NULL);
+
+	// 2. Abort live connections — their serve threads wake, clear their
+	//    slots, and signal conns_drained. Abort (not close): ownership
+	//    of the conn stays with its serve thread.
+	pthread_mutex_lock(&g_server.conns_mutex);
+	for (size_t i = 0; i < MAX_CONNS; i++) {
+		if (g_server.clients[i].conn != NULL) {
+			mcp_conn_abort(g_server.clients[i].conn);
+		}
+	}
+	while (g_server.active_clients > 0) {
+		pthread_cond_wait(&g_server.conns_drained, &g_server.conns_mutex);
+	}
+	pthread_mutex_unlock(&g_server.conns_mutex);
+
 	g_server.thread_started = false;
 	mcp_log_ring_stop();
 	MCP_LOG_I(LOG_PFX "server stopped");
