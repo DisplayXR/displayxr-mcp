@@ -103,8 +103,13 @@ Section "DisplayXR MCP Tools" SecMCP
 	Pop $0
 	Sleep 500
 
-	; Install the adapter binary.
+	; Install the adapter binary + its one runtime dependency. The
+	; adapter links pthreads dynamically (vcpkg x64-windows); CI's
+	; vcpkg applocal step stages pthreadVC3.dll next to the exe in
+	; ${BIN_DIR}. Without shipping it the installed adapter dies at
+	; load with STATUS_DLL_NOT_FOUND (0xC0000135).
 	File "${BIN_DIR}\displayxr-mcp.exe"
+	File "${BIN_DIR}\pthreadVC3.dll"
 
 	; Self-uninstaller. Distinct name so it doesn't collide with the
 	; runtime's Uninstall.exe or the shell's Uninstall-Shell.exe.
@@ -173,6 +178,7 @@ Section "Uninstall"
 
 	; Remove only files we installed.
 	Delete "$INSTDIR\bin\displayxr-mcp.exe"
+	Delete "$INSTDIR\bin\pthreadVC3.dll"
 	Delete "$INSTDIR\Uninstall-MCP.exe"
 	RMDir "$INSTDIR\bin"
 	RMDir "$INSTDIR"
