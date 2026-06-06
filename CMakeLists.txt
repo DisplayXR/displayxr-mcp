@@ -116,6 +116,10 @@ target_include_directories(displayxr_mcp
 target_link_libraries(displayxr_mcp
     PUBLIC ${DISPLAYXR_MCP_CJSON_TARGET} ${DISPLAYXR_MCP_PTHREAD_TARGET})
 
+# Surfaced in the MCP initialize response (serverInfo.version).
+target_compile_definitions(displayxr_mcp
+    PRIVATE DISPLAYXR_MCP_VERSION="${PROJECT_VERSION}")
+
 if(WIN32)
     # PIPE_PREFIX uses raw backslashes; nothing platform-specific to link
     # beyond what's already on the link line via the Windows SDK.

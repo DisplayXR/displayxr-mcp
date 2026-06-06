@@ -32,6 +32,22 @@ extern "C" {
 typedef cJSON *(*mcp_tool_fn)(const cJSON *params, void *userdata);
 
 /*!
+ * Exposure group for a tool, surfaced to clients via `_meta` in
+ * `tools/list` (`"_meta": {"displayxr/group": "app"}`). Consumers such
+ * as the workspace aggregator use it to decide default visibility:
+ * DIAGNOSTIC tools are hidden behind an opt-in flag, the rest are
+ * exposed. Zero value = DIAGNOSTIC so pre-v0.4.0 designated
+ * initializers keep their (correct) old behavior.
+ */
+enum mcp_tool_group
+{
+	MCP_TOOL_GROUP_DIAGNOSTIC = 0, //!< Introspection / debug (Phase A, tail_log, echo).
+	MCP_TOOL_GROUP_APP = 1,        //!< App-defined tool (XR_EXT_mcp_tools).
+	MCP_TOOL_GROUP_WORKSPACE = 2,  //!< Workspace control (shell Phase B).
+	MCP_TOOL_GROUP_CAPTURE = 3,    //!< Frame capture — the agent verification primitive.
+};
+
+/*!
  * Tool descriptor shown by `tools/list` and dispatched by `tools/call`.
  * All fields except @p fn are optional; the MCP protocol requires a
  * name + description and accepts a JSON Schema for parameters.
@@ -43,6 +59,7 @@ struct mcp_tool
 	const char *input_schema_json; //!< Optional static JSON Schema string.
 	mcp_tool_fn fn;
 	void *userdata;
+	enum mcp_tool_group group; //!< Exposure group; zero-init = DIAGNOSTIC.
 };
 
 /*!
@@ -115,10 +132,39 @@ mcp_server_stop(void);
 
 /*!
  * Register a tool. Safe to call before or after the server starts.
- * The descriptor pointer must outlive the server (use static storage).
+ * The descriptor pointer must outlive the server (use static storage —
+ * or heap storage that outlives the final unregister).
+ *
+ * When called on a running server with connected clients, broadcasts
+ * `notifications/tools/list_changed` so agents pick up the new tool —
+ * this is how late-registered app tools (XR_EXT_mcp_tools) surface.
  */
 void
 mcp_server_register_tool(const struct mcp_tool *tool);
+
+/*!
+ * Unregister a tool by name. No-op if the name is unknown. Broadcasts
+ * `notifications/tools/list_changed` when the server is running.
+ *
+ * The descriptor (and any heap storage backing it) may be freed only
+ * after this returns AND no call is in flight on the tool — callers
+ * that dispatch tool work asynchronously (event-queue trampolines)
+ * must drain their queue first.
+ */
+void
+mcp_server_unregister_tool(const char *name);
+
+/*!
+ * Declare the embedding app's stable identifier (the manifest `id`
+ * slug, `^[a-z0-9][a-z0-9-]{0,31}$`). Surfaced to clients in the
+ * `initialize` response (`serverInfo.appId`) and in the `tools/list`
+ * result `_meta` (`"displayxr/appId"`); the workspace aggregator uses
+ * it as the tool-name prefix (`<appId>__<tool>`). May be set or
+ * changed after start — broadcasts `tools/list_changed` so consumers
+ * re-read it. NULL or invalid ids are ignored (a warning is logged).
+ */
+void
+mcp_server_set_app_id(const char *app_id);
 
 #ifdef __cplusplus
 }

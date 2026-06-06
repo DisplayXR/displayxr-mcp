@@ -194,6 +194,18 @@ mcp_conn_write(struct mcp_conn *conn, const void *buf, size_t len)
 }
 
 void
+mcp_conn_abort(struct mcp_conn *conn)
+{
+	if (conn == NULL || conn->fd < 0) {
+		return;
+	}
+	// shutdown() wakes any thread blocked in read()/write() on this fd
+	// (read returns 0, write fails) and poisons all subsequent I/O —
+	// without freeing, so the owning thread can still mcp_conn_close().
+	(void)shutdown(conn->fd, SHUT_RDWR);
+}
+
+void
 mcp_conn_close(struct mcp_conn *conn)
 {
 	if (conn == NULL) {
@@ -314,7 +326,7 @@ mcp_self_pid(void)
 
 struct mcp_listener
 {
-	HANDLE pipe;
+	HANDLE pipe; //!< The *pending* (not-yet-connected) instance.
 	char name[128];
 	volatile LONG closed;
 };
@@ -322,7 +334,7 @@ struct mcp_listener
 struct mcp_conn
 {
 	HANDLE pipe;
-	bool owns_handle;
+	volatile LONG aborted;
 };
 
 static void
@@ -337,16 +349,33 @@ build_pipe_name_named(char *out, size_t cap, const char *role)
 	snprintf(out, cap, PIPE_PREFIX "%s", role);
 }
 
+/*!
+ * Create one pipe instance for @p name. Multi-instance
+ * (PIPE_UNLIMITED_INSTANCES) so several clients — e.g. the workspace
+ * aggregator plus a manual `--target pid:N` debug session — can be
+ * connected at once; accept() hands the connected instance to the conn
+ * and immediately creates a fresh instance to keep listening on.
+ */
+static HANDLE
+create_pipe_instance(const char *name)
+{
+	return CreateNamedPipeA(
+	    name,
+	    PIPE_ACCESS_DUPLEX,
+	    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+	    PIPE_UNLIMITED_INSTANCES,
+	    65536, // Out buffer.
+	    65536, // In buffer.
+	    0,
+	    NULL);
+}
+
 static struct mcp_listener *
 listener_open_pipe_name(const char *name)
 {
 	struct mcp_listener *l = MCP_TYPED_CALLOC(struct mcp_listener);
 	snprintf(l->name, sizeof(l->name), "%s", name);
-	l->pipe = CreateNamedPipeA(
-	    l->name,
-	    PIPE_ACCESS_DUPLEX,
-	    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-	    1, 65536, 65536, 0, NULL);
+	l->pipe = create_pipe_instance(l->name);
 	if (l->pipe == INVALID_HANDLE_VALUE) {
 		MCP_LOG_W(LOG_PFX "CreateNamedPipe(%s) failed: %lu", l->name, GetLastError());
 		free(l);
@@ -370,24 +399,9 @@ mcp_listener_open_named(const char *role)
 struct mcp_listener *
 mcp_listener_open(long pid)
 {
-	struct mcp_listener *l = MCP_TYPED_CALLOC(struct mcp_listener);
-	build_pipe_name(l->name, sizeof(l->name), pid);
-	l->pipe = CreateNamedPipeA(
-	    l->name,
-	    PIPE_ACCESS_DUPLEX,
-	    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-	    1,     // Max instances (single client).
-	    65536, // Out buffer.
-	    65536, // In buffer.
-	    0,
-	    NULL);
-	if (l->pipe == INVALID_HANDLE_VALUE) {
-		MCP_LOG_W(LOG_PFX "CreateNamedPipe(%s) failed: %lu", l->name, GetLastError());
-		free(l);
-		return NULL;
-	}
-	MCP_LOG_I(LOG_PFX "listening on %s", l->name);
-	return l;
+	char name[128];
+	build_pipe_name(name, sizeof(name), pid);
+	return listener_open_pipe_name(name);
 }
 
 struct mcp_conn *
@@ -403,9 +417,20 @@ mcp_listener_accept(struct mcp_listener *listener)
 	if (InterlockedCompareExchange(&listener->closed, 0, 0)) {
 		return NULL;
 	}
+
+	// Hand the connected instance to the conn (it owns the handle now)
+	// and stand up a fresh instance for the next client. If instance
+	// creation fails we keep serving the connected client — the next
+	// accept() will fail and the server stops listening, which beats
+	// dropping the live connection.
+	HANDLE connected = listener->pipe;
+	listener->pipe = create_pipe_instance(listener->name);
+	if (listener->pipe == INVALID_HANDLE_VALUE) {
+		MCP_LOG_W(LOG_PFX "CreateNamedPipe(%s) re-arm failed: %lu", listener->name, GetLastError());
+	}
+
 	struct mcp_conn *c = MCP_TYPED_CALLOC(struct mcp_conn);
-	c->pipe = listener->pipe;
-	c->owns_handle = false; // listener retains ownership
+	c->pipe = connected;
 	return c;
 }
 
@@ -442,6 +467,9 @@ mcp_conn_read(struct mcp_conn *conn, void *buf, size_t len)
 	}
 	char *p = buf;
 	while (len > 0) {
+		if (InterlockedCompareExchange(&conn->aborted, 0, 0)) {
+			return false; // Aborted by another thread; don't re-issue I/O.
+		}
 		OVERLAPPED ov = {0};
 		ov.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
 		DWORD got = 0;
@@ -468,6 +496,9 @@ mcp_conn_write(struct mcp_conn *conn, const void *buf, size_t len)
 	}
 	const char *p = buf;
 	while (len > 0) {
+		if (InterlockedCompareExchange(&conn->aborted, 0, 0)) {
+			return false; // Aborted by another thread; don't re-issue I/O.
+		}
 		OVERLAPPED ov = {0};
 		ov.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
 		DWORD wrote = 0;
@@ -487,6 +518,18 @@ mcp_conn_write(struct mcp_conn *conn, const void *buf, size_t len)
 }
 
 void
+mcp_conn_abort(struct mcp_conn *conn)
+{
+	if (conn == NULL || conn->pipe == INVALID_HANDLE_VALUE) {
+		return;
+	}
+	// Poison first so a reader that wakes and loops fails its flag
+	// check instead of re-issuing ReadFile on the still-open handle.
+	InterlockedExchange(&conn->aborted, 1);
+	CancelIoEx(conn->pipe, NULL);
+}
+
+void
 mcp_conn_close(struct mcp_conn *conn)
 {
 	if (conn == NULL) {
@@ -499,16 +542,13 @@ mcp_conn_close(struct mcp_conn *conn)
 		// complete the wait, but CancelIoEx makes it deterministic
 		// and avoids waiting on a remote client that has gone silent
 		// without sending FIN.
+		InterlockedExchange(&conn->aborted, 1);
 		CancelIoEx(conn->pipe, NULL);
-		if (conn->owns_handle) {
-			CloseHandle(conn->pipe);
-		} else {
-			// Listener-owned pipe: reset it for the next ConnectNamedPipe.
-			// Windows requires DisconnectNamedPipe between clients when
-			// nMaxInstances=1, otherwise subsequent CreateFile calls time
-			// out with ERROR_SEM_TIMEOUT.
-			DisconnectNamedPipe(conn->pipe);
-		}
+		// Every conn owns its handle since the multi-instance rework:
+		// server-side conns receive the connected instance from
+		// accept(), client-side conns own their CreateFile handle.
+		DisconnectNamedPipe(conn->pipe);
+		CloseHandle(conn->pipe);
 	}
 	free(conn);
 }
@@ -535,7 +575,6 @@ conn_connect_pipe_name(const char *name)
 	(void)SetNamedPipeHandleState(h, &mode, NULL, NULL);
 	struct mcp_conn *c = MCP_TYPED_CALLOC(struct mcp_conn);
 	c->pipe = h;
-	c->owns_handle = true;
 	return c;
 }
 
