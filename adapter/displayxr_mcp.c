@@ -8,6 +8,8 @@
  * Works on POSIX (unix domain socket) and Windows (named pipe).
  */
 
+#include "workspace_aggregator.h"
+
 #include "displayxr_mcp/mcp_transport.h"
 
 #include <errno.h>
@@ -59,12 +61,16 @@ static void
 usage(const char *argv0)
 {
 	fprintf(stderr,
-	        "usage: %s [--target <auto|<role>|pid:N>] | --pid <N|auto> | --list\n"
+	        "usage: %s [--target <auto|workspace|<role>|pid:N>] [--expose-diagnostics] | --pid <N|auto> | --list\n"
 	        "  --target auto      try known roles (shell, service), then unique PID session (default)\n"
+	        "  --target workspace aggregate the shell + every per-PID app session behind one\n"
+	        "                     MCP connection with <app-id>__<tool> namespacing; membership\n"
+	        "                     mirrors live (apps joining/leaving emit tools/list_changed)\n"
 	        "  --target <role>    attach to a named MCP endpoint (e.g. 'shell', 'service')\n"
 	        "                     resolves to /tmp/displayxr-mcp-<role>.sock or \\\\.\\pipe\\displayxr-mcp-<role>\n"
 	        "  --target pid:N     attach to a specific in-process server (handle apps)\n"
 	        "  --pid N | auto     back-compat form of --target pid:N / --target auto\n"
+	        "  --expose-diagnostics  (workspace mode) also expose DIAGNOSTIC-group tools\n"
 	        "  --list             print discovered sessions and exit\n",
 	        argv0);
 }
@@ -118,11 +124,14 @@ main(int argc, char **argv)
 	_setmode(_fileno(stdout), _O_BINARY);
 #endif
 
-	const char *target_arg = NULL; // "auto", "service", or "pid:N"
+	const char *target_arg = NULL; // "auto", "workspace", "service", or "pid:N"
 	bool list_mode = false;
+	bool expose_diagnostics = false;
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--target") == 0 && i + 1 < argc) {
 			target_arg = argv[++i];
+		} else if (strcmp(argv[i], "--expose-diagnostics") == 0) {
+			expose_diagnostics = true;
 		} else if (strcmp(argv[i], "--pid") == 0 && i + 1 < argc) {
 			// Back-compat: --pid N → --target pid:N ; --pid auto → --target auto.
 			const char *v = argv[++i];
@@ -164,6 +173,12 @@ main(int argc, char **argv)
 
 	if (target_arg == NULL) {
 		target_arg = "auto";
+	}
+
+	if (strcmp(target_arg, "workspace") == 0) {
+		// MCP-terminating aggregator mode — never reaches the 1:1
+		// byte-shuttle below.
+		return workspace_aggregator_run(expose_diagnostics);
 	}
 
 	struct mcp_conn *conn = NULL;

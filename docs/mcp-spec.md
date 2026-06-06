@@ -1,7 +1,8 @@
-# DisplayXR MCP Specification (v0.2)
+# DisplayXR MCP Specification (v0.2 + v0.4 protocol additions)
 
-**Status:** Draft — design doc, not yet scheduled
+**Status:** v0.2 (§1–§9) shipped as Phases A/B. §10 specifies the **v0.4.0 wire-protocol additions** — dynamic tools, tool groups, app identity, and the workspace aggregator.
 **Supersedes:** `display_xr_mcp_spec_v_0.md` (v0.1, private draft)
+**See also:** displayxr-runtime [`docs/roadmap/per-app-mcp-tools.md`](https://github.com/DisplayXR/displayxr-runtime/blob/main/docs/roadmap/per-app-mcp-tools.md) (the design doc §10 implements the framework half of)
 
 ## 1. Thesis
 
@@ -217,5 +218,53 @@ Either direction is a multi-month design problem with ecosystem implications. Tr
 ## 9. Versioning
 
 - **v0.1** (private draft) — broad tool surface, no grounding stories, several layer violations.
-- **v0.2** (this doc) — scoped to two driving stories; split into Phase A (handle-app mode, ships first, no service dependency) and Phase B (shell/service mode); deferred app-side and biometric tools with rationale.
-- **v0.3+** — app-side introspection (Tier 2), multi-display, event subscriptions.
+- **v0.2** (this doc, §1–§9) — scoped to two driving stories; split into Phase A (handle-app mode, ships first, no service dependency) and Phase B (shell/service mode); deferred app-side and biometric tools with rationale.
+- **v0.3.x** — extraction into this repo; installer + `Capabilities\MCP` registry gate; service endpoint removed (shell + per-PID only).
+- **v0.4.0** (§10) — dynamic tool registry + `tools/list_changed`, tool groups, app identity, multi-client transport, workspace aggregator. The framework prerequisites for app-defined tools (`XR_EXT_mcp_tools`, runtime-side — §6's Tier-2 question resolved in that direction rather than SDK-side servers).
+
+## 10. v0.4.0 protocol additions
+
+### 10.1 Dynamic tool registry
+
+`mcp_server_register_tool` / `mcp_server_unregister_tool` are legal while the server is running. Any change broadcasts `notifications/tools/list_changed` to every client that has completed `initialize`. The `initialize` response advertises `capabilities.tools.listChanged: true`. This is how late-registered app tools (e.g. a model viewer registering `run_animation` after a model loads) surface without reconnects.
+
+### 10.2 Tool groups
+
+Every tool carries a group, surfaced per tool in `tools/list`:
+
+```json
+{ "name": "play_pause", "...": "...", "_meta": { "displayxr/group": "app" } }
+```
+
+| Group | Meaning | Aggregator default |
+|---|---|---|
+| `workspace` | Shell window control (Phase B) | exposed |
+| `app` | App-defined (`XR_EXT_mcp_tools`) | exposed |
+| `capture` | Frame capture — the verification primitive | exposed |
+| `diagnostic` | Introspection/debug (Phase A, `tail_log`, `echo`) | hidden unless `--expose-diagnostics` |
+
+Consumers treat **untagged** tools (pre-v0.4.0 servers) as `diagnostic`, except a tool literally named `capture_frame`, which is treated as `capture` so old runtimes keep their verification primitive visible.
+
+### 10.3 App identity
+
+The embedder declares its stable app id (the manifest `id` slug, `^[a-z0-9][a-z0-9-]{0,31}$` — no underscores; `__` is reserved as the namespace separator) via `mcp_server_set_app_id()`. It surfaces in:
+
+- `initialize` → `serverInfo.appId`
+- `tools/list` result → `"_meta": { "displayxr/appId": "<id>" }`
+
+Setting or changing it broadcasts `tools/list_changed` so consumers re-read and re-prefix. The runtime calls this from `xrSetMCPAppInfoEXT` (P1, displayxr-runtime).
+
+### 10.4 Multi-client transport
+
+Each endpoint accepts multiple concurrent clients (thread per connection, `PIPE_UNLIMITED_INSTANCES` on Windows) so the workspace aggregator and a manual `--target pid:N` debug session can coexist. Responses and notification broadcasts are serialized per connection.
+
+### 10.5 Workspace aggregator (`displayxr-mcp --target workspace`)
+
+An MCP-terminating mode of the adapter (the 1:1 modes remain byte-shuttles): one stdio MCP server toward the agent, N backend connections behind it.
+
+- **Membership:** ~1 Hz enumeration of per-PID endpoints plus a probe of the `shell` role — never `service` (ghost endpoints from pre-extraction installs must not be aggregated). Joins and exits emit `tools/list_changed` upstream; the aggregator mirrors, it never snapshots.
+- **Namespacing:** backend tools are exposed as `<prefix>__<tool>`. Prefix = the backend's app id, else the slugified exe basename, else `app`. The shell's prefix is fixed `shell`. Collisions get sticky `-2`/`-3` suffixes — never renumbered or reused for the aggregator's lifetime, so tool names stay stable mid-conversation. Each merged entry carries `"_meta": { "displayxr/source": "<prefix>" }`.
+- **Routing:** `tools/call` is routed by prefix with JSON-RPC id rewriting; per-backend FIFO, parallel across backends. A backend dying with calls in flight yields JSON-RPC errors (`-32000`) for those ids plus a `list_changed` — the agent is never left hanging.
+- **Exposure:** group filtering per §10.2; `--expose-diagnostics` lifts the filter.
+- **Built-ins:** `workspace__list_apps` returns `{apps: [{prefix, pid, app_id, tools_exposed, tools_total}], shell: "running"|"not_running", diagnostics_exposed}` — the authoritative prefix ↔ pid ↔ app map joining app tools to shell window operations.
+- **Relay:** backend `tools/list_changed` triggers a cache refresh (also re-reading `displayxr/appId`, re-prefixing if it changed) and an upstream `list_changed`. Other backend notifications are not forwarded.

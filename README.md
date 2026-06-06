@@ -85,6 +85,22 @@ Then connect:
 displayxr-mcp --target my-app  # uses the adapter shipped with this lib
 ```
 
+Or aggregate every workspace endpoint (the shell + each per-PID app
+session) behind **one** MCP connection with `<app-id>__<tool>`
+namespacing and live membership (`tools/list_changed` as apps join and
+leave):
+
+```bash
+displayxr-mcp --target workspace [--expose-diagnostics]
+```
+
+v0.4.0 additions for embedders: tools may be registered/unregistered
+while the server runs (clients get `tools/list_changed`), each tool
+carries an exposure `group` (`MCP_TOOL_GROUP_APP` / `WORKSPACE` /
+`CAPTURE` / `DIAGNOSTIC`), and `mcp_server_set_app_id()` declares the
+app's stable slug used as the aggregator's tool-name prefix. Protocol
+details: `docs/mcp-spec.md` §10.
+
 ## Wiring into your logging system
 
 The built-in `tail_log` tool reads from a ring buffer that the framework

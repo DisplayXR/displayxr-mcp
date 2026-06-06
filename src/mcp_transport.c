@@ -47,6 +47,28 @@ struct mcp_conn
 	int fd;
 };
 
+/*!
+ * A peer that disconnects while we write must surface as a failed
+ * write, not a process-killing SIGPIPE — the server lives inside the
+ * embedding app (a handle app, the shell), and a library must never
+ * touch process-global signal disposition. macOS: per-fd SO_NOSIGPIPE.
+ * Linux: MSG_NOSIGNAL per send() in mcp_conn_write.
+ */
+static void
+suppress_sigpipe(int fd)
+{
+#ifdef SO_NOSIGPIPE
+	int on = 1;
+	(void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+#else
+	(void)fd;
+#endif
+}
+
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+
 static void
 build_sock_path(char *out, size_t cap, long pid)
 {
@@ -131,6 +153,7 @@ mcp_listener_accept(struct mcp_listener *listener)
 	if (cfd < 0) {
 		return NULL;
 	}
+	suppress_sigpipe(cfd);
 	struct mcp_conn *c = MCP_TYPED_CALLOC(struct mcp_conn);
 	c->fd = cfd;
 	return c;
@@ -180,7 +203,8 @@ mcp_conn_write(struct mcp_conn *conn, const void *buf, size_t len)
 	}
 	const uint8_t *p = buf;
 	while (len > 0) {
-		ssize_t n = write(conn->fd, p, len);
+		// send(MSG_NOSIGNAL), not write(): see suppress_sigpipe().
+		ssize_t n = send(conn->fd, p, len, MSG_NOSIGNAL);
 		if (n <= 0) {
 			if (n < 0 && errno == EINTR) {
 				continue;
@@ -246,6 +270,7 @@ conn_connect_path(const char *path)
 		close(fd);
 		return NULL;
 	}
+	suppress_sigpipe(fd);
 	struct mcp_conn *c = MCP_TYPED_CALLOC(struct mcp_conn);
 	c->fd = fd;
 	return c;
