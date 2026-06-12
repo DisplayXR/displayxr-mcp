@@ -23,7 +23,7 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install ninja (Linux)
         if: matrix.os == 'ubuntu-latest'
@@ -179,7 +179,7 @@ jobs:
 
       - name: Upload installer artifact (Windows)
         if: matrix.os == 'windows-latest'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: DisplayXRMCPSetup
           path: build/installer/DisplayXRMCPSetup-*.exe
@@ -187,7 +187,7 @@ jobs:
 
       - name: Upload installer artifact (macOS)
         if: matrix.os == 'macos-latest'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: DisplayXRMCP-macOS
           path: build/installer/DisplayXRMCP-*.pkg
@@ -196,14 +196,14 @@ jobs:
       # On tag pushes attach the installer to the GitHub Release.
       - name: Attach installer to release (Windows tag push)
         if: matrix.os == 'windows-latest' && startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: build/installer/DisplayXRMCPSetup-*.exe
           fail_on_unmatched_files: true
 
       - name: Attach installer to release (macOS tag push)
         if: matrix.os == 'macos-latest' && startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: build/installer/DisplayXRMCP-*.pkg
           fail_on_unmatched_files: true
@@ -220,7 +220,7 @@ jobs:
     steps:
       - name: Mint dispatch token
         id: dispatch-token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.DISPLAYXR_APP_ID }}
           private-key: ${{ secrets.DISPLAYXR_APP_PRIVATE_KEY }}
@@ -228,7 +228,7 @@ jobs:
           repositories: displayxr-runtime
 
       - name: Dispatch versions.json bump
-        uses: peter-evans/repository-dispatch@v3
+        uses: peter-evans/repository-dispatch@v4
         with:
           token: ${{ steps.dispatch-token.outputs.token }}
           repository: DisplayXR/displayxr-runtime
