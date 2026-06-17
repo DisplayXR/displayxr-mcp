@@ -21,7 +21,7 @@ Used by:
 include(FetchContent)
 FetchContent_Declare(displayxr_mcp
     GIT_REPOSITORY https://github.com/DisplayXR/displayxr-mcp
-    GIT_TAG v0.2.0)
+    GIT_TAG v0.4.1)
 FetchContent_MakeAvailable(displayxr_mcp)
 
 target_link_libraries(your_target PRIVATE displayxr_mcp::mcp)
