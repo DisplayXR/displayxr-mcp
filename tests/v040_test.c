@@ -1,4 +1,4 @@
-// Copyright 2026, DisplayXR / Leia Inc.
+// Copyright 2026, The DisplayXR Project and its contributors
 // SPDX-License-Identifier: Apache-2.0
 /*
  * v0.4.0 feature test: dynamic tool registry, tool groups, app id,
