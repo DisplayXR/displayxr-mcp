@@ -1,5 +1,5 @@
 // Copyright 2026, DisplayXR / Leia Inc.
-// SPDX-License-Identifier: BSL-1.0
+// SPDX-License-Identifier: Apache-2.0
 /*
  * Standalone smoke test for the displayxr_mcp framework.
  *

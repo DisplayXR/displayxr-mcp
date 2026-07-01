@@ -1,5 +1,5 @@
 // Copyright 2026, DisplayXR / Leia Inc.
-// SPDX-License-Identifier: BSL-1.0
+// SPDX-License-Identifier: Apache-2.0
 /*!
  * @file
  * @brief  Opt-in MPSC log ring used by the MCP @c tail_log tool.

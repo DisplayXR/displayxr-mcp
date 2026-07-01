@@ -181,4 +181,4 @@ The on-the-wire JSON-RPC framing matches MCP `2024-11-05`.
 
 ## License
 
-[BSL-1.0](LICENSE) — Boost Software License.
+[Apache-2.0](LICENSE).
