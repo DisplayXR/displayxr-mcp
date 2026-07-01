@@ -1,5 +1,5 @@
 // Copyright 2026, DisplayXR / Leia Inc.
-// SPDX-License-Identifier: BSL-1.0
+// SPDX-License-Identifier: Apache-2.0
 /*!
  * @file
  * @brief  Per-client_id allowlist for MCP write tools (Phase B §5).

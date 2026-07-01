@@ -1,6 +1,6 @@
 ; DisplayXR MCP Tools Installer
 ; Copyright 2026, DisplayXR
-; SPDX-License-Identifier: BSL-1.0
+; SPDX-License-Identifier: Apache-2.0
 ;
 ; Standalone installer for the DisplayXR MCP (Model Context Protocol)
 ; tools. Ships the displayxr-mcp.exe stdio↔pipe adapter and writes a

@@ -1,5 +1,5 @@
 // Copyright 2026, DisplayXR / Leia Inc.
-// SPDX-License-Identifier: BSL-1.0
+// SPDX-License-Identifier: Apache-2.0
 /*
  * v0.4.0 feature test: dynamic tool registry, tool groups, app id,
  * multi-client transport, and the workspace aggregator.
