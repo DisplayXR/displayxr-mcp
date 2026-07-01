@@ -46,12 +46,47 @@
 !endif
 
 ;--------------------------------
+; Code signing (SIGN_CMD passed from CMake; empty = unsigned build).
+; SIGN_CMD carries no secret — on a signing-capable build machine it points at
+; the configured signer; elsewhere it is empty and the build is unsigned.
+;
+; The installer .exe is signed via !finalize. The UNINSTALLER is signed via a
+; two-pass build instead of !uninstfinalize: !uninstfinalize is unreliable —
+; the uninstaller NSIS writes at install time is a self-copy of the (signed)
+; installer's exe header, so it inherits the INSTALLER's cert-table pointer,
+; which can dangle past the smaller uninstaller file => effectively unsigned
+; (signtool even refuses to re-sign it, 0x800700C1). Use the robust path.
+;
+; Two-pass (canonical NSIS recipe, kept in-script so the CMake target needs no
+; change): compile an INNER installer whose only job is to WriteUninstaller to
+; %TEMP% and Quit; run it; sign that %TEMP%\Uninstall-MCP.exe; then File-include
+; the pre-signed uninstaller in the real pass. INNER is RequestExecutionLevel
+; user so it never triggers UAC when run from makensis on a non-elevated host.
+!ifndef INNER
+	!ifdef SIGN_CMD
+		!if "${SIGN_CMD}" != ""
+			!finalize '${SIGN_CMD} "%1"'
+			!makensis '-DINNER "-DVERSION=${VERSION}" "-DVERSION_MAJOR=${VERSION_MAJOR}" "-DVERSION_MINOR=${VERSION_MINOR}" "-DVERSION_PATCH=${VERSION_PATCH}" "-DBUILD_NUM=${BUILD_NUM}" "-DSOURCE_DIR=${SOURCE_DIR}" "-DBIN_DIR=${BIN_DIR}" "-DOUTPUT_DIR=${OUTPUT_DIR}" "${__FILE__}"' = 0
+			!system '"$%TEMP%\DisplayXRMCPSetup_inner.exe"' = 2
+			!system '${SIGN_CMD} "$%TEMP%\Uninstall-MCP.exe"' = 0
+			!define USE_PRESIGNED_UNINST
+		!endif
+	!endif
+!endif
+
+;--------------------------------
 ; General Attributes
 
 Name "DisplayXR MCP Tools ${VERSION}"
-OutFile "${OUTPUT_DIR}\DisplayXRMCPSetup-${VERSION}.${BUILD_NUM}.exe"
+!ifdef INNER
+	; Throwaway inner installer: only emits the uninstaller to %TEMP%.
+	OutFile "$%TEMP%\DisplayXRMCPSetup_inner.exe"
+	RequestExecutionLevel user
+!else
+	OutFile "${OUTPUT_DIR}\DisplayXRMCPSetup-${VERSION}.${BUILD_NUM}.exe"
+	RequestExecutionLevel admin
+!endif
 InstallDir "$PROGRAMFILES64\DisplayXR\MCP"
-RequestExecutionLevel admin
 ShowInstDetails show
 ShowUninstDetails show
 
@@ -112,8 +147,19 @@ Section "DisplayXR MCP Tools" SecMCP
 	File "${BIN_DIR}\pthreadVC3.dll"
 
 	; Self-uninstaller. Distinct name so it doesn't collide with the
-	; runtime's Uninstall.exe or the shell's Uninstall-Shell.exe.
+	; runtime's Uninstall.exe or the shell's Uninstall-Shell.exe. In a
+	; signed build, install the pre-signed uninstaller produced by the inner
+	; pass (two-pass signing — see the code-signing block in the header);
+	; otherwise (unsigned build / CI) write it normally.
+!ifdef USE_PRESIGNED_UNINST
+	; File /oname respects the current $OUTDIR (above it is $INSTDIR\bin);
+	; point it at $INSTDIR so the uninstaller lands exactly where the
+	; registry UninstallString entries below expect it.
+	SetOutPath "$INSTDIR"
+	File "/oname=Uninstall-MCP.exe" "$%TEMP%\Uninstall-MCP.exe"
+!else
 	WriteUninstaller "$INSTDIR\Uninstall-MCP.exe"
+!endif
 
 	; Capability registration — the runtime + shell read this at
 	; startup. Sibling extension point to
@@ -209,6 +255,14 @@ SectionEnd
 ; Installer Functions
 
 Function .onInit
+!ifdef INNER
+	; Inner pass only: emit the uninstaller to %TEMP% (the binary that gets
+	; signed and File-included by the real pass) then bail — no UI, no install.
+	; This whole path is absent from the real installer.
+	SetSilent silent
+	WriteUninstaller "$%TEMP%\Uninstall-MCP.exe"
+	Quit
+!endif
 	; 64-bit Windows check.
 	${IfNot} ${RunningX64}
 		MessageBox MB_ICONSTOP "DisplayXR MCP Tools requires 64-bit Windows."

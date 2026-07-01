@@ -195,7 +195,44 @@ if(DISPLAYXR_MCP_BUILD_INSTALLER)
         set(BUILD_NUM 0)
     endif()
 
+    # Optional code-signing command, sourced from the SIGN_CMD environment
+    # variable at configure time. Empty on any machine without it (clones,
+    # GitHub-hosted CI) -> the adapter exe + installer + uninstaller build
+    # unsigned, exactly as before. On a signing-capable build machine
+    # SIGN_CMD points at the configured signer; it carries NO cert/secret —
+    # this repo just honors the hook if present.
+    #
+    # The adapter exe MUST be signed BEFORE makensis packs it: Smart App
+    # Control checks the binary extracted at install/load time, so signing
+    # the finished installer alone is not enough. The installer .exe is
+    # signed after makensis; the uninstaller is signed via the two-pass
+    # build in DisplayXRMCPInstaller.nsi (driven by the /DSIGN_CMD below).
+    #
+    # FORCE so the live SIGN_CMD env always wins on reconfigure: a plain
+    # CACHE var is seeded only on the first configure, so a build tree first
+    # configured with SIGN_CMD unset would keep caching "" even after
+    # SIGN_CMD is later set, silently leaving the uninstaller unsigned.
+    set(SIGN_CMD "$ENV{SIGN_CMD}" CACHE STRING "Code-signing command for binaries/installer/uninstaller (empty = unsigned)" FORCE)
+
+    if(SIGN_CMD)
+        set(DXRMCP_SIGN_ADAPTER
+            COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+                -File ${CMAKE_CURRENT_SOURCE_DIR}/scripts/sign-release.ps1
+                -Path $<TARGET_FILE_DIR:displayxr_mcp_adapter>
+                -SignCmd ${SIGN_CMD})
+        set(DXRMCP_SIGN_INSTALLER
+            COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+                -File ${CMAKE_CURRENT_SOURCE_DIR}/scripts/sign-release.ps1
+                -Path ${DXRMCP_INSTALLER_OUT_DIR}
+                -SignCmd ${SIGN_CMD})
+    else()
+        set(DXRMCP_SIGN_ADAPTER "")
+        set(DXRMCP_SIGN_INSTALLER "")
+    endif()
+
     add_custom_target(displayxr_mcp_installer ALL
+        # Sign the adapter exe first (gated on SIGN_CMD; empty list = no-op).
+        ${DXRMCP_SIGN_ADAPTER}
         COMMAND ${MAKENSIS}
             -V2
             -DVERSION=${PROJECT_VERSION}
@@ -206,7 +243,10 @@ if(DISPLAYXR_MCP_BUILD_INSTALLER)
             -DBIN_DIR=$<TARGET_FILE_DIR:displayxr_mcp_adapter>
             -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
             -DOUTPUT_DIR=${DXRMCP_INSTALLER_OUT_DIR}
+            -DSIGN_CMD=${SIGN_CMD}
             ${CMAKE_CURRENT_SOURCE_DIR}/installer/DisplayXRMCPInstaller.nsi
+        # Sign the finished installer .exe (gated on SIGN_CMD).
+        ${DXRMCP_SIGN_INSTALLER}
         DEPENDS displayxr_mcp_adapter
         COMMENT "Building DisplayXR MCP Tools installer (NSIS)"
         VERBATIM)
