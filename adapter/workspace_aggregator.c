@@ -525,7 +525,7 @@ refresh_backend_tools(int idx)
 
 /*!
  * Apply a fresh tools/list result to the backend cache; re-prefix if
- * the app id changed (late xrSetMCPAppInfoEXT). Returns true if the
+ * the app id changed (late xrSetMCPAppInfoDXR). Returns true if the
  * agent-visible tool surface changed.
  */
 static bool

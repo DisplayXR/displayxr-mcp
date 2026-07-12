@@ -510,7 +510,7 @@ handle_request(const cJSON *req, struct mcp_client *client)
 		cJSON *result = cJSON_CreateObject();
 		cJSON_AddItemToObject(result, "tools", build_tools_list());
 		// Result-level _meta carries the app id so consumers that joined
-		// before xrSetMCPAppInfoEXT ran can re-read it on list_changed.
+		// before xrSetMCPAppInfoDXR ran can re-read it on list_changed.
 		pthread_mutex_lock(&g_server.tools_mutex);
 		if (g_server.app_id[0] != '\0') {
 			cJSON *meta = cJSON_CreateObject();

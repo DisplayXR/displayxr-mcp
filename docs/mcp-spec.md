@@ -33,7 +33,7 @@ The agent:
 - `get_runtime_metrics` — confirms tracking and FPS are fine
 - `tail_log` — notices the app reported a canvas size mismatched to display physical size
 - Cross-references `docs/architecture/kooima-projection.md`
-- Replies: *"Unity camera aspect is 16:9 but the display is 16:10; the app declared a FoV with wrong horizontal tangents relative to the recommended projection, flattening disparity by ~12%. Read `XR_EXT_display_info::canvasSize` instead of hardcoding."*
+- Replies: *"Unity camera aspect is 16:9 but the display is 16:10; the app declared a FoV with wrong horizontal tangents relative to the recommended projection, flattening disparity by ~12%. Read `XR_DXR_display_info::canvasSize` instead of hardcoding."*
 
 The point is not that the agent writes code — it is that the agent can see the pixels, read the numerical ground truth, and consult the docs simultaneously. No human debugger holds all three in head at once, and stereo bugs are exactly where the eye deceives.
 
@@ -119,7 +119,7 @@ Five tools, all runtime-internal, none requiring shell or service:
 | `capture_frame` | Stereo swapchain readback as PNG | In-process swapchain access |
 | `tail_log` | Streaming U_LOG tail for this app's session | `u_logging.c` in-process ring |
 
-Plus three trivial helpers usable in both phases: `list_sessions` (returns one in handle-app mode), `get_runtime_metrics`, `get_display_info` (wraps `XR_EXT_display_info`).
+Plus three trivial helpers usable in both phases: `list_sessions` (returns one in handle-app mode), `get_runtime_metrics`, `get_display_info` (wraps `XR_DXR_display_info`).
 
 ### 4.B — Phase B (shell/service mode)
 
@@ -220,7 +220,7 @@ Either direction is a multi-month design problem with ecosystem implications. Tr
 - **v0.1** (private draft) — broad tool surface, no grounding stories, several layer violations.
 - **v0.2** (this doc, §1–§9) — scoped to two driving stories; split into Phase A (handle-app mode, ships first, no service dependency) and Phase B (shell/service mode); deferred app-side and biometric tools with rationale.
 - **v0.3.x** — extraction into this repo; installer + `Capabilities\MCP` registry gate; service endpoint removed (shell + per-PID only).
-- **v0.4.0** (§10) — dynamic tool registry + `tools/list_changed`, tool groups, app identity, multi-client transport, workspace aggregator. The framework prerequisites for app-defined tools (`XR_EXT_mcp_tools`, runtime-side — §6's Tier-2 question resolved in that direction rather than SDK-side servers).
+- **v0.4.0** (§10) — dynamic tool registry + `tools/list_changed`, tool groups, app identity, multi-client transport, workspace aggregator. The framework prerequisites for app-defined tools (`XR_DXR_mcp_tools`, runtime-side — §6's Tier-2 question resolved in that direction rather than SDK-side servers).
 
 ## 10. v0.4.0 protocol additions
 
@@ -239,7 +239,7 @@ Every tool carries a group, surfaced per tool in `tools/list`:
 | Group | Meaning | Aggregator default |
 |---|---|---|
 | `workspace` | Shell window control (Phase B) | exposed |
-| `app` | App-defined (`XR_EXT_mcp_tools`) | exposed |
+| `app` | App-defined (`XR_DXR_mcp_tools`) | exposed |
 | `capture` | Frame capture — the verification primitive | exposed |
 | `diagnostic` | Introspection/debug (Phase A, `tail_log`, `echo`) | hidden unless `--expose-diagnostics` |
 
@@ -252,7 +252,7 @@ The embedder declares its stable app id (the manifest `id` slug, `^[a-z0-9][a-z0
 - `initialize` → `serverInfo.appId`
 - `tools/list` result → `"_meta": { "displayxr/appId": "<id>" }`
 
-Setting or changing it broadcasts `tools/list_changed` so consumers re-read and re-prefix. The runtime calls this from `xrSetMCPAppInfoEXT` (P1, displayxr-runtime).
+Setting or changing it broadcasts `tools/list_changed` so consumers re-read and re-prefix. The runtime calls this from `xrSetMCPAppInfoDXR` (P1, displayxr-runtime).
 
 ### 10.4 Multi-client transport
 

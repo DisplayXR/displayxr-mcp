@@ -42,7 +42,7 @@ typedef cJSON *(*mcp_tool_fn)(const cJSON *params, void *userdata);
 enum mcp_tool_group
 {
 	MCP_TOOL_GROUP_DIAGNOSTIC = 0, //!< Introspection / debug (Phase A, tail_log, echo).
-	MCP_TOOL_GROUP_APP = 1,        //!< App-defined tool (XR_EXT_mcp_tools).
+	MCP_TOOL_GROUP_APP = 1,        //!< App-defined tool (XR_DXR_mcp_tools).
 	MCP_TOOL_GROUP_WORKSPACE = 2,  //!< Workspace control (shell Phase B).
 	MCP_TOOL_GROUP_CAPTURE = 3,    //!< Frame capture — the agent verification primitive.
 };
@@ -137,7 +137,7 @@ mcp_server_stop(void);
  *
  * When called on a running server with connected clients, broadcasts
  * `notifications/tools/list_changed` so agents pick up the new tool —
- * this is how late-registered app tools (XR_EXT_mcp_tools) surface.
+ * this is how late-registered app tools (XR_DXR_mcp_tools) surface.
  */
 void
 mcp_server_register_tool(const struct mcp_tool *tool);
