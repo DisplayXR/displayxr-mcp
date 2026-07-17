@@ -131,6 +131,10 @@ if(DISPLAYXR_MCP_BUILD_ADAPTER)
     add_executable(displayxr_mcp_adapter
         adapter/displayxr_mcp.c
         adapter/workspace_aggregator.c)
+    if(WIN32)
+        # Embedded Explorer icon (shared DisplayXR app tile) + version info.
+        target_sources(displayxr_mcp_adapter PRIVATE adapter/resource.rc)
+    endif()
     add_executable(displayxr_mcp::adapter ALIAS displayxr_mcp_adapter)
     set_target_properties(displayxr_mcp_adapter PROPERTIES
         OUTPUT_NAME displayxr-mcp
