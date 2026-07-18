@@ -101,6 +101,10 @@ ShowUninstDetails show
 
 !define MUI_ABORTWARNING
 
+; Explorer / wizard / uninstaller icon — the shared DisplayXR app tile.
+!define MUI_ICON   "${SOURCE_DIR}\assets\displayxr_app.ico"
+!define MUI_UNICON "${SOURCE_DIR}\assets\displayxr_app.ico"
+
 ;--------------------------------
 ; Pages
 
