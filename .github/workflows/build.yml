@@ -200,6 +200,13 @@ jobs:
         with:
           files: build/installer/DisplayXRMCPSetup-*.exe
           fail_on_unmatched_files: true
+          # ONLY this step may set generate_release_notes — NOT the macOS step
+          # below. The action folds the flag into `body` before calling the API,
+          # and on update does `body = existing + "\n\n" + notes`, so both
+          # matrix legs flagged would post the notes twice. Gives every release
+          # a "## What's Changed" floor; /dxr-release PHASE 3.6 prepends curated
+          # "## Highlights" above it, which the website's news feed parses.
+          generate_release_notes: true
 
       - name: Attach installer to release (macOS tag push)
         if: matrix.os == 'macos-latest' && startsWith(github.ref, 'refs/tags/v')
