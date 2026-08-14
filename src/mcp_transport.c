@@ -18,9 +18,11 @@
 
 #ifndef _WIN32
 #include <dirent.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 #endif
 
@@ -209,6 +211,54 @@ mcp_conn_write(struct mcp_conn *conn, const void *buf, size_t len)
 			if (n < 0 && errno == EINTR) {
 				continue;
 			}
+			return false;
+		}
+		p += n;
+		len -= (size_t)n;
+	}
+	return true;
+}
+
+bool
+mcp_conn_write_bounded(struct mcp_conn *conn, const void *buf, size_t len, uint32_t timeout_ms)
+{
+	if (conn == NULL) {
+		return false;
+	}
+	// Deadline across the whole frame, not per chunk — the contract is
+	// "the caller stalls at most timeout_ms", whatever the peer does.
+	struct timespec start;
+	timespec_get(&start, TIME_UTC);
+	const uint8_t *p = buf;
+	while (len > 0) {
+		struct timespec now;
+		timespec_get(&now, TIME_UTC);
+		int64_t elapsed_ms = (int64_t)(now.tv_sec - start.tv_sec) * 1000 +
+		                     (now.tv_nsec - start.tv_nsec) / 1000000;
+		int64_t remain_ms = (int64_t)timeout_ms - elapsed_ms;
+		if (remain_ms <= 0) {
+			mcp_conn_abort(conn); // partial frame => stream unusable
+			return false;
+		}
+		struct pollfd pfd = {.fd = conn->fd, .events = POLLOUT};
+		int pr = poll(&pfd, 1, (int)remain_ms);
+		if (pr == 0) {
+			mcp_conn_abort(conn);
+			return false;
+		}
+		if (pr < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			mcp_conn_abort(conn);
+			return false;
+		}
+		ssize_t n = send(conn->fd, p, len, MSG_NOSIGNAL);
+		if (n <= 0) {
+			if (n < 0 && errno == EINTR) {
+				continue;
+			}
+			mcp_conn_abort(conn);
 			return false;
 		}
 		p += n;
@@ -534,6 +584,53 @@ mcp_conn_write(struct mcp_conn *conn, const void *buf, size_t len)
 		}
 		CloseHandle(ov.hEvent);
 		if (!ok || wrote == 0) {
+			return false;
+		}
+		p += wrote;
+		len -= wrote;
+	}
+	return true;
+}
+
+bool
+mcp_conn_write_bounded(struct mcp_conn *conn, const void *buf, size_t len, uint32_t timeout_ms)
+{
+	if (conn == NULL) {
+		return false;
+	}
+	// Deadline across the whole frame, not per chunk — the contract is
+	// "the caller stalls at most timeout_ms", whatever the peer does.
+	const ULONGLONG deadline = GetTickCount64() + timeout_ms;
+	const char *p = buf;
+	while (len > 0) {
+		if (InterlockedCompareExchange(&conn->aborted, 0, 0)) {
+			return false;
+		}
+		ULONGLONG now = GetTickCount64();
+		if (now >= deadline) {
+			mcp_conn_abort(conn); // partial frame => stream unusable
+			return false;
+		}
+		OVERLAPPED ov = {0};
+		ov.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
+		DWORD wrote = 0;
+		BOOL ok = WriteFile(conn->pipe, p, (DWORD)len, &wrote, &ov);
+		if (!ok && GetLastError() == ERROR_IO_PENDING) {
+			DWORD wr = WaitForSingleObject(ov.hEvent, (DWORD)(deadline - now));
+			if (wr != WAIT_OBJECT_0) {
+				// Timed out mid-write: cancel, harvest the (possibly
+				// partial) completion, poison the stream.
+				CancelIoEx(conn->pipe, &ov);
+				GetOverlappedResult(conn->pipe, &ov, &wrote, TRUE);
+				CloseHandle(ov.hEvent);
+				mcp_conn_abort(conn);
+				return false;
+			}
+			ok = GetOverlappedResult(conn->pipe, &ov, &wrote, FALSE);
+		}
+		CloseHandle(ov.hEvent);
+		if (!ok || wrote == 0) {
+			mcp_conn_abort(conn);
 			return false;
 		}
 		p += wrote;

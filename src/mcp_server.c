@@ -186,9 +186,22 @@ jsonrpc_error(const cJSON *id, int code, const char *message)
 // ---------- Notifications ----------
 
 /*!
- * Send a JSON-RPC notification to every initialized client. Tolerates
- * write failures (the client's serve thread notices the dead conn on
- * its next read and unwinds the slot).
+ * Per-notification write budget. Notifications are fire-and-forget
+ * JSON-RPC and are sent from EMBEDDER threads (the DisplayXR runtime
+ * broadcasts from app main threads inside OpenXR calls) — a peer that
+ * stops reading must never wedge the caller. A healthy peer's pipe
+ * buffer absorbs a small frame instantly; needing even part of this
+ * budget already means the peer is pathological.
+ */
+#define NOTIFY_WRITE_TIMEOUT_MS 250
+
+/*!
+ * Send a JSON-RPC notification to every initialized client, with a
+ * BOUNDED write per client (displayxr-runtime#928): a slow/dead
+ * consumer costs the caller at most NOTIFY_WRITE_TIMEOUT_MS once —
+ * the timed-out write aborts that connection (partial frames corrupt
+ * Content-Length framing, so it must not be reused) and its serve
+ * thread notices the dead conn and unwinds the slot.
  */
 static void
 broadcast_notification(const char *method)
@@ -202,14 +215,28 @@ broadcast_notification(const char *method)
 		return;
 	}
 
+	size_t len = strlen(body);
+	char header[64];
+	int hlen = snprintf(header, sizeof(header), "Content-Length: %zu\r\n\r\n", len);
+
 	pthread_mutex_lock(&g_server.conns_mutex);
 	for (size_t i = 0; i < MAX_CONNS; i++) {
 		struct mcp_client *cl = &g_server.clients[i];
 		if (cl->conn == NULL || !cl->initialized) {
 			continue;
 		}
-		pthread_mutex_lock(&cl->write_mutex);
-		(void)write_frame(cl->conn, body);
+		// TRYlock, not lock: if this client's serve thread is itself
+		// stuck writing a response to the same non-reading peer, it
+		// holds write_mutex indefinitely — a blocking acquire here
+		// would reintroduce the unbounded stall the bounded write
+		// exists to remove. Notifications are droppable by contract.
+		if (pthread_mutex_trylock(&cl->write_mutex) != 0) {
+			continue;
+		}
+		if (hlen > 0 &&
+		    mcp_conn_write_bounded(cl->conn, header, (size_t)hlen, NOTIFY_WRITE_TIMEOUT_MS)) {
+			(void)mcp_conn_write_bounded(cl->conn, body, len, NOTIFY_WRITE_TIMEOUT_MS);
+		}
 		pthread_mutex_unlock(&cl->write_mutex);
 	}
 	pthread_mutex_unlock(&g_server.conns_mutex);

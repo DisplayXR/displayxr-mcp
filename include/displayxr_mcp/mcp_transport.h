@@ -11,6 +11,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -74,6 +75,23 @@ mcp_conn_read(struct mcp_conn *conn, void *buf, size_t len);
  */
 bool
 mcp_conn_write(struct mcp_conn *conn, const void *buf, size_t len);
+
+/*!
+ * Bounded write of exactly @p len bytes: gives up after @p timeout_ms.
+ *
+ * On timeout the connection is ABORTED (as by mcp_conn_abort) before
+ * returning false — a timed-out write may have landed partially, which
+ * corrupts Content-Length framing, so the stream must not be reused.
+ * The connection's serve thread notices and unwinds the slot.
+ *
+ * For fire-and-forget traffic (notifications) sent from threads the
+ * embedder cannot afford to stall: a peer that stops reading costs the
+ * caller at most one timeout, then loses its connection — it never
+ * wedges the embedding process (the DisplayXR runtime embeds this on
+ * app main threads inside OpenXR calls; see displayxr-runtime#928).
+ */
+bool
+mcp_conn_write_bounded(struct mcp_conn *conn, const void *buf, size_t len, uint32_t timeout_ms);
 
 /*!
  * Abort the connection: wake any thread blocked in mcp_conn_read /
