@@ -434,9 +434,16 @@ build_pipe_name_named(char *out, size_t cap, const char *role)
 static HANDLE
 create_pipe_instance(const char *name)
 {
+	// FILE_FLAG_OVERLAPPED is LOAD-BEARING (displayxr-runtime#928): the
+	// read/write paths pass OVERLAPPED structs, but on a synchronous
+	// handle WriteFile IGNORES them and blocks inline — which made
+	// mcp_conn_write_bounded's timeout decorative and let a non-reading
+	// client wedge the embedder's calling thread inside ZwWriteFile.
+	// With a real overlapped handle the IO_PENDING + event-wait paths
+	// (and the bounded write's CancelIoEx timeout) actually engage.
 	return CreateNamedPipeA(
 	    name,
-	    PIPE_ACCESS_DUPLEX,
+	    PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
 	    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
 	    PIPE_UNLIMITED_INSTANCES,
 	    65536, // Out buffer.
@@ -485,8 +492,29 @@ mcp_listener_accept(struct mcp_listener *listener)
 	if (listener == NULL) {
 		return NULL;
 	}
-	BOOL ok = ConnectNamedPipe(listener->pipe, NULL);
-	if (!ok && GetLastError() != ERROR_PIPE_CONNECTED) {
+	// The handle is FILE_FLAG_OVERLAPPED, so ConnectNamedPipe must go
+	// through an OVERLAPPED too (passing NULL on an overlapped handle
+	// can misreport completion). Semantics unchanged: blocking accept,
+	// woken by mcp_listener_close's CancelIoEx (wait completes, the
+	// harvest fails with ERROR_OPERATION_ABORTED → NULL).
+	OVERLAPPED ov = {0};
+	ov.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
+	if (ov.hEvent == NULL) {
+		return NULL;
+	}
+	BOOL ok = ConnectNamedPipe(listener->pipe, &ov);
+	if (!ok) {
+		DWORD err = GetLastError();
+		if (err == ERROR_IO_PENDING) {
+			WaitForSingleObject(ov.hEvent, INFINITE);
+			DWORD ignored = 0;
+			ok = GetOverlappedResult(listener->pipe, &ov, &ignored, FALSE);
+		} else if (err == ERROR_PIPE_CONNECTED) {
+			ok = TRUE; // Client raced ahead of the accept — already connected.
+		}
+	}
+	CloseHandle(ov.hEvent);
+	if (!ok) {
 		return NULL;
 	}
 	if (InterlockedCompareExchange(&listener->closed, 0, 0)) {
@@ -517,16 +545,15 @@ mcp_listener_close(struct mcp_listener *listener)
 	}
 	InterlockedExchange(&listener->closed, 1);
 	if (listener->pipe != INVALID_HANDLE_VALUE) {
-		// The server thread is parked in synchronous ConnectNamedPipe
-		// on this handle (the listener pipe is created without
-		// FILE_FLAG_OVERLAPPED). On Windows, CloseHandle from another
-		// thread does NOT wake a synchronous ConnectNamedPipe — the
-		// kernel keeps the I/O parked and pthread_join in
-		// mcp_server_stop deadlocks. CancelIoEx cancels any pending
-		// I/O on the handle from any thread; the parked
-		// ConnectNamedPipe returns with ERROR_OPERATION_ABORTED and
-		// the server thread exits cleanly. DisconnectNamedPipe alone
-		// is a no-op when no client is connected.
+		// The server thread is parked in an overlapped ConnectNamedPipe
+		// wait on this handle. CloseHandle from another thread does
+		// NOT wake it — the kernel keeps the I/O parked and
+		// pthread_join in mcp_server_stop deadlocks. CancelIoEx
+		// cancels any pending I/O on the handle from any thread; the
+		// parked accept's GetOverlappedResult fails with
+		// ERROR_OPERATION_ABORTED and the server thread exits cleanly.
+		// DisconnectNamedPipe alone is a no-op when no client is
+		// connected.
 		CancelIoEx(listener->pipe, NULL);
 		DisconnectNamedPipe(listener->pipe);
 		CloseHandle(listener->pipe);
