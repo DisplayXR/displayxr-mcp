@@ -184,8 +184,8 @@ The most exciting voice-control demos ("tune the depth of this app," "move that 
 
 Two candidate paths, both out of scope for v0.2:
 
-- **`XR_EXT_app_introspection`** — a new OpenXR extension letting apps publish a small structured menu of controls (named params, ranges, units). The MCP server would surface these as dynamically discovered tools.
-- **SDK-side MCP endpoints** — the Unity plugin and WebXR bridge expose their own MCP servers, sitting alongside the runtime's. Agents connect to both.
+- **`XR_DXR_app_introspection`** — a new OpenXR extension letting apps publish a small structured menu of controls (named params, ranges, units). The MCP server would surface these as dynamically discovered tools.
+- **SDK-side MCP endpoints** — the Unity plugin and the DisplayXR Browser expose their own MCP servers, sitting alongside the runtime's. Agents connect to both.
 
 Either direction is a multi-month design problem with ecosystem implications. Treat it as v0.3+ and scope separately.
 
