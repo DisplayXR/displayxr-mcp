@@ -83,7 +83,7 @@ Name "DisplayXR MCP Tools ${VERSION}"
 	OutFile "$%TEMP%\DisplayXRMCPSetup_inner.exe"
 	RequestExecutionLevel user
 !else
-	OutFile "${OUTPUT_DIR}\DisplayXRMCPSetup-${VERSION}.${BUILD_NUM}.exe"
+	OutFile "${OUTPUT_DIR}\DisplayXRMCPSetup-${VERSION}.exe"
 	RequestExecutionLevel admin
 !endif
 InstallDir "$PROGRAMFILES64\DisplayXR\MCP"
