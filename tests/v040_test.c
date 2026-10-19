@@ -456,6 +456,49 @@ section_b_aggregator(const char *adapter)
 	check(WIFEXITED(status), "B: aggregator exited cleanly on stdin EOF");
 }
 
+// ---------------------------------------------------------------- section C
+
+// The aggregator spoken to in newline-delimited JSON (the MCP stdio
+// transport) must answer in newline-delimited JSON.
+static void
+section_c_aggregator_ndjson(const char *adapter)
+{
+	printf("--- C: workspace aggregator, ndjson stdio ---\n");
+	FILE *to = NULL, *from = NULL;
+	pid_t child = fork_adapter(adapter, &to, &from);
+	check(child > 0, "C: aggregator forked");
+	if (child <= 0) {
+		return;
+	}
+	char line[65536];
+	fputs("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n", to);
+	fflush(to);
+	bool got = fgets(line, sizeof(line), from) != NULL;
+	check(got && line[0] == '{' && strchr(line, '\n') != NULL, "C: initialize reply is one JSON line");
+	if (got) {
+		check_substr(line, "displayxr-mcp-workspace", "C: aggregator serverInfo");
+	}
+	fputs("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n", to);
+	fputs("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n", to);
+	fflush(to);
+	// Skip any list_changed notification lines until the id 2 response.
+	bool found = false;
+	for (int i = 0; i < 16 && fgets(line, sizeof(line), from) != NULL; i++) {
+		check(line[0] == '{', "C: every stdout line is a bare JSON message");
+		if (strstr(line, "\"id\":2") != NULL) {
+			check_substr(line, "\"workspace__list_apps\"", "C: tools/list over ndjson");
+			found = true;
+			break;
+		}
+	}
+	check(found, "C: tools/list response received");
+	fclose(to);
+	fclose(from);
+	int status = 0;
+	waitpid(child, &status, 0);
+	check(WIFEXITED(status), "C: aggregator exited cleanly on stdin EOF");
+}
+
 // ---------------------------------------------------------------- main
 
 int
@@ -479,6 +522,7 @@ main(int argc, char **argv)
 
 	section_a_direct_multiclient();
 	section_b_aggregator(argv[1]);
+	section_c_aggregator_ndjson(argv[1]);
 
 	mcp_server_stop();
 

@@ -76,6 +76,7 @@ Runtime state, swapchains, U_LOG ring
 - Runtime spawns an MCP server thread when `DISPLAYXR_MCP=1` is set at app launch.
 - Server listens on `\\.\pipe\displayxr-mcp-<pid>` (Windows) or `/tmp/displayxr-mcp-<pid>.sock` (macOS).
 - `displayxr-mcp` is a stdio-to-socket adapter: with no service running it enumerates handle-app sockets by PID and attaches.
+- **Framing.** The adapter's stdio side is the standard MCP stdio transport: newline-delimited JSON (one JSON-RPC message per line, UTF-8, no embedded newlines). For one release it also auto-detects the legacy LSP-style `Content-Length:` framing — chosen when the client's first bytes are a `Content-Length:` header — and replies in whichever framing the client used. (Adapters ≤ v0.5.5 spoke only `Content-Length`, so spec-conformant clients such as Claude Code timed out at connect.) The socket / named pipe between adapter and in-process server is a private wire and stays `Content-Length`-framed, so older runtimes and shells work with a newer adapter.
 - Zero app source changes — just an env var at launch.
 
 ### 3.2 Shell/service mode (Phase B)
@@ -260,7 +261,7 @@ Each endpoint accepts multiple concurrent clients (thread per connection, `PIPE_
 
 ### 10.5 Workspace aggregator (`displayxr-mcp --target workspace`)
 
-An MCP-terminating mode of the adapter (the 1:1 modes remain byte-shuttles): one stdio MCP server toward the agent, N backend connections behind it.
+An MCP-terminating mode of the adapter (the 1:1 modes only re-frame messages between the stdio and socket framings, §3.1, and never parse them): one stdio MCP server toward the agent — same stdio framing rules as §3.1 — N backend connections behind it.
 
 - **Membership:** ~1 Hz enumeration of per-PID endpoints plus a probe of the `shell` role — never `service` (ghost endpoints from pre-extraction installs must not be aggregated). Joins and exits emit `tools/list_changed` upstream; the aggregator mirrors, it never snapshots.
 - **Namespacing:** backend tools are exposed as `<prefix>__<tool>`. Prefix = the backend's app id, else the slugified exe basename, else `app`. The shell's prefix is fixed `shell`. Collisions get sticky `-2`/`-3` suffixes — never renumbered or reused for the aggregator's lifetime, so tool names stay stable mid-conversation. Each merged entry carries `"_meta": { "displayxr/source": "<prefix>" }`.

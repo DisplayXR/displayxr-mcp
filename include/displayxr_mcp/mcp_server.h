@@ -7,8 +7,10 @@
  *
  * Enabled when the @c DISPLAYXR_MCP environment variable is set at
  * xrInstanceCreate time. Spawns a detached thread that binds a per-PID
- * unix socket and speaks MCP-style JSON-RPC 2.0 framed by Content-Length
- * headers.
+ * unix socket and speaks MCP JSON-RPC 2.0 framed by Content-Length
+ * headers. That framing is private to the socket / pipe: MCP clients
+ * connect through the `displayxr-mcp` adapter, which speaks the standard
+ * MCP stdio transport (newline-delimited JSON) to the client.
  *
  * @see docs/roadmap/mcp-spec-v0.2.md
  * @see docs/roadmap/mcp-phase-a-plan.md

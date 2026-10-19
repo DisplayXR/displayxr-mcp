@@ -20,6 +20,7 @@
  *  - per-backend reader: routes responses + notifications upstream.
  */
 
+#include "stdio_framing.h"
 #include "workspace_aggregator.h"
 
 #include "displayxr_mcp/mcp_transport.h"
@@ -53,7 +54,6 @@
 #define MAX_INFLIGHT 128
 #define MAX_PREFIXES 128
 #define POLL_INTERVAL_MS 1000
-#define MAX_FRAME_BYTES (4 * 1024 * 1024)
 #define NS_SEP "__"
 
 // ---------------------------------------------------------------- state
@@ -108,108 +108,43 @@ static struct
 	bool shell_connecting;
 
 	pthread_mutex_t stdout_mutex;
+
+	//! Agent-side framing, fixed by the first stdin message.
+	struct dxr_stdio_framing_latch framing;
 } g;
 
 // ---------------------------------------------------------------- framing
 
+// Agent side: MCP stdio transport (newline-delimited JSON), or the
+// legacy Content-Length framing when the client opened with it — see
+// stdio_framing.h. Replies always use the client's framing.
 static bool
 write_frame_stdout(const char *body)
 {
-	size_t len = strlen(body);
+	enum dxr_stdio_framing f = dxr_stdio_framing_latch_wait(&g.framing);
+	size_t out_len = 0;
+	char *out = dxr_stdio_encode(f, body, strlen(body), &out_len);
+	if (out == NULL) {
+		return false;
+	}
 	pthread_mutex_lock(&g.stdout_mutex);
-	bool ok = fprintf(stdout, "Content-Length: %zu\r\n\r\n", len) > 0 &&
-	          fwrite(body, 1, len, stdout) == len && fflush(stdout) == 0;
+	bool ok = dxr_stdio_write_stdout(out, out_len);
 	pthread_mutex_unlock(&g.stdout_mutex);
+	free(out);
 	return ok;
 }
 
-// Read one Content-Length-framed body from stdin. Caller frees.
-static char *
-read_frame_stdin(void)
-{
-	char line[256];
-	size_t content_length = 0;
-	bool have_length = false;
-	while (fgets(line, sizeof(line), stdin) != NULL) {
-		if (line[0] == '\r' || line[0] == '\n') {
-			break;
-		}
-		if (strncasecmp(line, "Content-Length:", 15) == 0) {
-			content_length = (size_t)strtoul(line + 15, NULL, 10);
-			have_length = true;
-		}
-	}
-	if (!have_length || content_length == 0 || content_length > MAX_FRAME_BYTES) {
-		return NULL;
-	}
-	char *body = malloc(content_length + 1);
-	if (body == NULL) {
-		return NULL;
-	}
-	if (fread(body, 1, content_length, stdin) != content_length) {
-		free(body);
-		return NULL;
-	}
-	body[content_length] = '\0';
-	return body;
-}
-
-static bool
-conn_read_line(struct mcp_conn *conn, char *buf, size_t cap)
-{
-	size_t n = 0;
-	while (n + 1 < cap) {
-		char c;
-		if (!mcp_conn_read(conn, &c, 1)) {
-			return false;
-		}
-		buf[n++] = c;
-		if (c == '\n') {
-			buf[n] = '\0';
-			return true;
-		}
-	}
-	return false;
-}
-
+// Backend side: always Content-Length (the private socket / pipe wire).
 static char *
 read_frame_conn(struct mcp_conn *conn)
 {
-	char line[256];
-	size_t content_length = 0;
-	bool have_length = false;
-	while (conn_read_line(conn, line, sizeof(line))) {
-		if (line[0] == '\r' || line[0] == '\n') {
-			break;
-		}
-		if (strncasecmp(line, "Content-Length:", 15) == 0) {
-			content_length = (size_t)strtoul(line + 15, NULL, 10);
-			have_length = true;
-		}
-	}
-	if (!have_length || content_length == 0 || content_length > MAX_FRAME_BYTES) {
-		return NULL;
-	}
-	char *body = malloc(content_length + 1);
-	if (body == NULL) {
-		return NULL;
-	}
-	if (!mcp_conn_read(conn, body, content_length)) {
-		free(body);
-		return NULL;
-	}
-	body[content_length] = '\0';
-	return body;
+	return dxr_conn_read_frame(conn, NULL);
 }
 
 static bool
 write_frame_conn(struct mcp_conn *conn, const char *body)
 {
-	size_t len = strlen(body);
-	char header[64];
-	int hlen = snprintf(header, sizeof(header), "Content-Length: %zu\r\n\r\n", len);
-	return hlen > 0 && mcp_conn_write(conn, header, (size_t)hlen) &&
-	       mcp_conn_write(conn, body, len);
+	return dxr_conn_write_frame(conn, body, strlen(body));
 }
 
 // ---------------------------------------------------------------- JSON-RPC helpers
@@ -1169,6 +1104,7 @@ workspace_aggregator_run(bool expose_diagnostics)
 {
 	pthread_mutex_init(&g.lock, NULL);
 	pthread_mutex_init(&g.stdout_mutex, NULL);
+	dxr_stdio_framing_latch_init(&g.framing);
 	g.expose_diagnostics = expose_diagnostics;
 
 	pthread_t poller;
@@ -1179,14 +1115,19 @@ workspace_aggregator_run(bool expose_diagnostics)
 	pthread_detach(poller);
 
 	// Agent frame loop until stdin EOF.
+	struct dxr_stdio_reader reader;
+	dxr_stdio_reader_init(&reader, dxr_stdio_read_stdin, NULL);
 	for (;;) {
-		char *body = read_frame_stdin();
+		size_t len = 0;
+		char *body = dxr_stdio_reader_next(&reader, &len);
 		if (body == NULL) {
 			break;
 		}
-		handle_agent_frame(body, strlen(body));
+		dxr_stdio_framing_latch_set(&g.framing, reader.framing);
+		handle_agent_frame(body, len);
 		free(body);
 	}
+	dxr_stdio_reader_fini(&reader);
 
 	// Stdin closed: abort backends so their readers unwind, then exit.
 	// Process teardown reclaims the rest; no graceful drain needed for
