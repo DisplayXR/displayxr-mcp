@@ -221,6 +221,7 @@ Either direction is a multi-month design problem with ecosystem implications. Tr
 - **v0.2** (this doc, §1–§9) — scoped to two driving stories; split into Phase A (handle-app mode, ships first, no service dependency) and Phase B (shell/service mode); deferred app-side and biometric tools with rationale.
 - **v0.3.x** — extraction into this repo; installer + `Capabilities\MCP` registry gate; service endpoint removed (shell + per-PID only).
 - **v0.4.0** (§10) — dynamic tool registry + `tools/list_changed`, tool groups, app identity, multi-client transport, workspace aggregator. The framework prerequisites for app-defined tools (`XR_DXR_mcp_tools`, runtime-side — §6's Tier-2 question resolved in that direction rather than SDK-side servers).
+- **v0.5.6** (§10.6) — tool errors: a handler result with top-level `"isError": true` is answered as `result.isError: true` with the payload kept, instead of being indistinguishable from success.
 
 ## 10. v0.4.0 protocol additions
 
@@ -268,3 +269,13 @@ An MCP-terminating mode of the adapter (the 1:1 modes remain byte-shuttles): one
 - **Exposure:** group filtering per §10.2; `--expose-diagnostics` lifts the filter.
 - **Built-ins:** `workspace__list_apps` returns `{apps: [{prefix, pid, app_id, tools_exposed, tools_total}], shell: "running"|"not_running", diagnostics_exposed}` — the authoritative prefix ↔ pid ↔ app map joining app tools to shell window operations.
 - **Relay:** backend `tools/list_changed` triggers a cache refresh (also re-reading `displayxr/appId`, re-prefixing if it changed) and an upstream `list_changed`. Other backend notifications are not forwarded.
+
+### 10.6 Tool errors (`isError`)
+
+A tool handler that fails for a reason the agent can act on — bad arguments, the app refused, the app is busy — returns a **result** flagged as an error, not a JSON-RPC error. The handler returns an object whose top-level `"isError"` is `true`; the server then sets `result.isError: true` (MCP `CallToolResult.isError`) and keeps the object in `content[0].text` and `structured` as for any result:
+
+```json
+{"jsonrpc":"2.0","id":7,"result":{"content":[{"type":"text","text":"{\"isError\":true,\"error\":\"unknown behavior 'nope'\"}"}],"isError":true,"structured":{"isError":true,"error":"unknown behavior 'nope'"}}}
+```
+
+Returning `NULL` stays the JSON-RPC internal error (`-32000`, `"tool handler failed"`) and carries no message — reserve it for failures that are not the tool's to explain. The aggregator (§10.5) forwards backend results verbatim, so the flag survives `--target workspace`. The runtime's app-defined tools (`XR_DXR_mcp_tools`) use this for an `xrSubmitMCPToolResultDXR(..., XR_FALSE, ...)` submit.

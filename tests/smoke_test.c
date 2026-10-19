@@ -9,6 +9,7 @@
  *   - initialize
  *   - tools/list
  *   - tools/call mock_list_windows
+ *   - tools/call mock_fail (a tool error: result.isError, message kept)
  *
  * Verifies the JSON-RPC envelope, tool dispatch, and stdio↔socket
  * pump. This is the same wire path Phase B (in shell-pvt) and Phase A
@@ -50,6 +51,40 @@ static const struct mcp_tool MOCK_TOOL = {
     .input_schema_json = "{\"type\":\"object\"}",
     .fn = mock_list_windows,
 };
+
+// Fails the way an app tool does (XR_DXR_mcp_tools, a throwing handler):
+// a result object flagged isError, carrying the message.
+static cJSON *
+mock_fail(const cJSON *params, void *userdata)
+{
+	(void)params;
+	(void)userdata;
+	cJSON *o = cJSON_CreateObject();
+	cJSON_AddTrueToObject(o, "isError");
+	cJSON_AddStringToObject(o, "error", "unknown behavior 'nope'");
+	return o;
+}
+
+static const struct mcp_tool MOCK_FAIL_TOOL = {
+    .name = "mock_fail",
+    .description = "Smoke-test stand-in. Always fails as a tool error.",
+    .input_schema_json = "{\"type\":\"object\"}",
+    .fn = mock_fail,
+};
+
+// result.isError of a tools/call response: 1 = true, 0 = absent/false, -1 = bad body.
+static int
+result_is_error(const char *body)
+{
+	cJSON *root = cJSON_Parse(body);
+	if (root == NULL) {
+		return -1;
+	}
+	const cJSON *result = cJSON_GetObjectItemCaseSensitive(root, "result");
+	int r = result == NULL ? -1 : cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(result, "isError")) ? 1 : 0;
+	cJSON_Delete(root);
+	return r;
+}
 
 static int
 expect_substring(const char *haystack, const char *needle, const char *label)
@@ -119,6 +154,7 @@ main(int argc, char **argv)
 	// Start the server.
 	setenv("DISPLAYXR_MCP", "1", 1);
 	mcp_server_register_tool(&MOCK_TOOL);
+	mcp_server_register_tool(&MOCK_FAIL_TOOL);
 	mcp_server_maybe_start_named("smoke");
 
 	// Give the server thread a beat to bind.
@@ -182,6 +218,31 @@ main(int argc, char **argv)
 	} else {
 		failures += expect_substring(body, "\"mock_app\"", "tools/call: returned mock window name");
 		failures += expect_substring(body, "\"id\":42", "tools/call: returned mock window id");
+		if (result_is_error(body) != 0) {
+			fprintf(stderr, "FAIL: tools/call: a successful result must not carry isError:\n%s\n", body);
+			failures++;
+		} else {
+			printf("  ok: tools/call: success carries no isError\n");
+		}
+		free(body);
+	}
+
+	// 4. tools/call mock_fail — a tool error is a RESULT with isError:true and
+	// the message, never a JSON-RPC error.
+	send_frame(out, "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\","
+	                "\"params\":{\"name\":\"mock_fail\",\"arguments\":{}}}");
+	body = NULL;
+	if (recv_frame(in, &body) != 0) {
+		fprintf(stderr, "FAIL: no tools/call (mock_fail) response\n");
+		failures++;
+	} else {
+		failures += expect_substring(body, "unknown behavior 'nope'", "tools/call error: message kept");
+		if (strstr(body, "\"error\":{") != NULL || result_is_error(body) != 1) {
+			fprintf(stderr, "FAIL: tools/call error: expected result.isError=true, got:\n%s\n", body);
+			failures++;
+		} else {
+			printf("  ok: tools/call error: result.isError=true\n");
+		}
 		free(body);
 	}
 
