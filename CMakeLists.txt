@@ -130,7 +130,8 @@ endif()
 if(DISPLAYXR_MCP_BUILD_ADAPTER)
     add_executable(displayxr_mcp_adapter
         adapter/displayxr_mcp.c
-        adapter/workspace_aggregator.c)
+        adapter/workspace_aggregator.c
+        adapter/stdio_framing.c)
     if(WIN32)
         # Embedded Explorer icon (shared DisplayXR app tile) + version info.
         target_sources(displayxr_mcp_adapter PRIVATE adapter/resource.rc)
@@ -158,6 +159,12 @@ if(DISPLAYXR_MCP_BUILD_TESTS)
     add_executable(displayxr_mcp_v040 tests/v040_test.c)
     target_link_libraries(displayxr_mcp_v040 PRIVATE displayxr_mcp)
     add_test(NAME v040 COMMAND displayxr_mcp_v040 $<TARGET_FILE:displayxr_mcp_adapter>)
+
+    # Agent-side stdio framing (ndjson + legacy Content-Length), in-memory.
+    add_executable(displayxr_mcp_stdio_framing tests/stdio_framing_test.c adapter/stdio_framing.c)
+    target_include_directories(displayxr_mcp_stdio_framing PRIVATE adapter)
+    target_link_libraries(displayxr_mcp_stdio_framing PRIVATE displayxr_mcp)
+    add_test(NAME stdio_framing COMMAND displayxr_mcp_stdio_framing)
 endif()
 
 # ---------------------------------------------------------------- install

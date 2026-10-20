@@ -7,8 +7,14 @@ Guidance for Claude Code (claude.ai/code) when working in this repo.
 A small **MCP (Model Context Protocol) server framework + stdio↔socket
 adapter** used by the DisplayXR runtime + shell to expose live state
 and control surfaces to AI agents (Claude Code, voice CLI, custom
-clients). Hand-rolled JSON-RPC 2.0 with `Content-Length` framing,
-unix-socket / Windows-named-pipe transport.
+clients). Hand-rolled JSON-RPC 2.0 over a unix-socket /
+Windows-named-pipe transport. **Two framings, one per leg:** the agent
+side of the adapter (stdio) speaks the MCP stdio transport —
+newline-delimited JSON — auto-detecting legacy `Content-Length` framing
+for old clients (`adapter/stdio_framing.c`); the adapter ↔ in-process
+server socket/pipe is a private `Content-Length`-framed wire. Never make
+the stdio side Content-Length-only again: spec-conformant MCP clients
+(Claude Code) hang at connect (fixed after v0.5.5).
 
 The framework knows **nothing** about OpenXR, the DisplayXR runtime,
 or the shell. It's a generic embedder library: a process registers
@@ -72,7 +78,9 @@ env override), the tool conventions, and the named-pipe topology.
 | `adapter/displayxr_mcp.c` | The stdio↔socket adapter binary. `--target <pid:N\|shell>` selects the named pipe to bridge. |
 | `external/cjson/` | Vendored cJSON. The framework reuses parent project's `cJSON::cJSON` target if one exists; falls back to this. |
 | `installer/DisplayXRMCPInstaller.nsi` | NSIS installer for the adapter binary + Capabilities registry registration. |
-| `tests/smoke_test.c` | ctest binary that exercises the wire protocol end-to-end. Runs on every CI build. |
+| `adapter/stdio_framing.c` | Agent-side stdio framing: ndjson (MCP stdio transport) with legacy Content-Length auto-detect; Content-Length frame I/O on the server connection. |
+| `tests/smoke_test.c` | ctest binary that exercises the wire protocol end-to-end, in both stdio framings. Runs on every CI build. |
+| `tests/stdio_framing_test.c` | In-memory unit test of the stdio framing (UTF-8, every split point). |
 | `docs/mcp-spec.md` | The product/protocol spec. **Update this if you change tool conventions or transport.** |
 
 ## Build commands

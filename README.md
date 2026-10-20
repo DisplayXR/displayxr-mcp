@@ -1,9 +1,10 @@
 # displayxr-mcp
 
 Tiny embeddable [MCP (Model Context Protocol)](https://modelcontextprotocol.io)
-server framework. Hand-rolled JSON-RPC 2.0 with `Content-Length` framing,
-unix-socket / Windows-named-pipe transport, and a stdio bridge so any MCP
-client (Claude Code, voice CLI, custom agent) can connect.
+server framework. Hand-rolled JSON-RPC 2.0 over a unix-socket /
+Windows-named-pipe transport, and a stdio bridge (the `displayxr-mcp`
+adapter) that speaks the standard MCP stdio transport — newline-delimited
+JSON — so any MCP client (Claude Code, voice CLI, custom agent) can connect.
 
 The library knows nothing about OpenXR, the DisplayXR runtime, or the shell.
 It's a server-side framework: the embedder registers tools (name, JSON
@@ -177,7 +178,23 @@ are preinstalled on the GitHub Actions macos-latest runner).
 
 See [`docs/mcp-spec.md`](docs/mcp-spec.md) for the protocol semantics,
 tool conventions, and safety model (audit log + per-client allowlist).
-The on-the-wire JSON-RPC framing matches MCP `2024-11-05`.
+Framing, by leg:
+
+- **Agent ↔ adapter (stdio)** — the MCP stdio transport: one JSON-RPC
+  message per line, UTF-8, `\n`-terminated, no embedded newlines. Adapters
+  up to v0.5.5 spoke only LSP-style `Content-Length:` framing here, which
+  spec-conformant clients (Claude Code included) do not send — they timed
+  out at connect. The adapter now auto-detects from the client's first
+  bytes: a leading `Content-Length:` header selects that legacy framing
+  (kept for one release for existing clients), anything else is
+  newline-delimited JSON, and replies use whichever framing the client
+  used.
+- **Adapter ↔ in-process server (socket / named pipe)** — a private wire,
+  `Content-Length:`-framed. Embedders never see it; it is unchanged so
+  runtimes and shells built against older framework versions keep working
+  with a newer adapter.
+
+The JSON-RPC payloads follow MCP `2024-11-05`.
 
 ## License
 

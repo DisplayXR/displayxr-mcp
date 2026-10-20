@@ -4,10 +4,15 @@
  * @file
  * @brief  Stdio ↔ per-PID-socket/pipe bridge for the DisplayXR MCP server.
  *
- * Two blocking threads pump bytes in opposite directions. No parsing.
- * Works on POSIX (unix domain socket) and Windows (named pipe).
+ * Two blocking threads pump messages in opposite directions. The agent
+ * side (stdio) speaks the MCP stdio transport — newline-delimited JSON —
+ * or, auto-detected, the legacy Content-Length framing (see
+ * stdio_framing.h); the server side (unix domain socket on POSIX, named
+ * pipe on Windows) is always Content-Length-framed. Message bodies pass
+ * through unparsed.
  */
 
+#include "stdio_framing.h"
 #include "workspace_aggregator.h"
 
 #include "displayxr_mcp/mcp_transport.h"
@@ -26,35 +31,6 @@
 #include <windows.h>
 #else
 #include <unistd.h>
-#endif
-
-#ifdef _WIN32
-typedef SSIZE_T ssize_t;
-static ssize_t
-read_fd(int fd, void *buf, size_t n)
-{
-	return _read(fd, buf, (unsigned)n);
-}
-static ssize_t
-write_fd(int fd, const void *buf, size_t n)
-{
-	return _write(fd, buf, (unsigned)n);
-}
-#define STDIN_FD _fileno(stdin)
-#define STDOUT_FD _fileno(stdout)
-#else
-static ssize_t
-read_fd(int fd, void *buf, size_t n)
-{
-	return read(fd, buf, n);
-}
-static ssize_t
-write_fd(int fd, const void *buf, size_t n)
-{
-	return write(fd, buf, n);
-}
-#define STDIN_FD STDIN_FILENO
-#define STDOUT_FD STDOUT_FILENO
 #endif
 
 static void
@@ -80,34 +56,46 @@ struct pump_args
 {
 	struct mcp_conn *conn;
 	bool stdin_to_conn;
+	struct dxr_stdio_framing_latch *latch;
 };
 
 static void *
 pump_thread(void *arg)
 {
 	struct pump_args *a = arg;
-	char buf[4096];
 	if (a->stdin_to_conn) {
+		struct dxr_stdio_reader reader;
+		dxr_stdio_reader_init(&reader, dxr_stdio_read_stdin, NULL);
 		for (;;) {
-			ssize_t r = read_fd(STDIN_FD, buf, sizeof(buf));
-			if (r <= 0) {
+			size_t len = 0;
+			char *body = dxr_stdio_reader_next(&reader, &len);
+			if (body == NULL) {
 				break;
 			}
-			if (!mcp_conn_write(a->conn, buf, (size_t)r)) {
+			dxr_stdio_framing_latch_set(a->latch, reader.framing);
+			bool ok = dxr_conn_write_frame(a->conn, body, len);
+			free(body);
+			if (!ok) {
 				break;
 			}
 		}
+		dxr_stdio_reader_fini(&reader);
 	} else {
 		for (;;) {
-			// The transport's read is blocking and fetches as many
-			// bytes as the caller asks for — pull in chunks instead.
-			char c;
-			if (!mcp_conn_read(a->conn, &c, 1)) {
+			size_t len = 0;
+			char *body = dxr_conn_read_frame(a->conn, &len);
+			if (body == NULL) {
 				break;
 			}
-			// Drain any more bytes already queued — simple one-at-a-time
-			// keeps the adapter simple and low-latency.
-			if (write_fd(STDOUT_FD, &c, 1) <= 0) {
+			// Reply in the framing the client used; blocks until the
+			// client's first message has fixed it.
+			enum dxr_stdio_framing f = dxr_stdio_framing_latch_wait(a->latch);
+			size_t out_len = 0;
+			char *out = dxr_stdio_encode(f, body, len, &out_len);
+			free(body);
+			bool ok = out != NULL && dxr_stdio_write_stdout(out, out_len);
+			free(out);
+			if (!ok) {
 				break;
 			}
 		}
@@ -119,7 +107,8 @@ int
 main(int argc, char **argv)
 {
 #ifdef _WIN32
-	// MCP peers speak raw binary framing; disable CRLF translation.
+	// Disable CRLF translation: the legacy framing counts bytes, and
+	// ndjson lines must end in a bare \n.
 	_setmode(_fileno(stdin), _O_BINARY);
 	_setmode(_fileno(stdout), _O_BINARY);
 #endif
@@ -233,17 +222,22 @@ main(int argc, char **argv)
 		return 1;
 	}
 
-	struct pump_args up = {.conn = conn, .stdin_to_conn = true};
-	struct pump_args down = {.conn = conn, .stdin_to_conn = false};
+	static struct dxr_stdio_framing_latch latch;
+	dxr_stdio_framing_latch_init(&latch);
+	struct pump_args up = {.conn = conn, .stdin_to_conn = true, .latch = &latch};
+	struct pump_args down = {.conn = conn, .stdin_to_conn = false, .latch = &latch};
 
 	pthread_t t_up, t_down;
 	pthread_create(&t_up, NULL, pump_thread, &up);
 	pthread_create(&t_down, NULL, pump_thread, &down);
 
-	// When the stdin-side thread exits (client closed stdin), tear the
-	// connection so the conn-side thread can unblock its read.
+	// When the stdin-side thread exits (client closed stdin), abort the
+	// connection so the conn-side thread unblocks its read. Unblock a
+	// writer still waiting for the framing (client sent nothing) too.
 	pthread_join(t_up, NULL);
-	mcp_conn_close(conn);
+	dxr_stdio_framing_latch_set(&latch, DXR_STDIO_FRAMING_NDJSON);
+	mcp_conn_abort(conn);
 	pthread_join(t_down, NULL);
+	mcp_conn_close(conn);
 	return 0;
 }
