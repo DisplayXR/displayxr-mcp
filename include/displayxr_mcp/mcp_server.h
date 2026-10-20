@@ -29,7 +29,13 @@ extern "C" {
  * Tool handler callback. @p params is the JSON-RPC `params` object (may be
  * NULL). The handler returns a cJSON node that becomes the `result` field,
  * or NULL to signal an error — in which case the server replies with a
- * JSON-RPC internal-error response.
+ * JSON-RPC internal-error response (no message reaches the agent).
+ *
+ * To fail the call as a TOOL error the agent can read (bad arguments, the
+ * app refused), return an object with a top-level `"isError": true`, e.g.
+ * `{"isError":true,"error":"unknown behavior 'nope'"}`: the response then
+ * carries `result.isError = true` (MCP CallToolResult.isError) with the
+ * object in `content` / `structured` as usual. See mcp-spec.md §10.6.
  */
 typedef cJSON *(*mcp_tool_fn)(const cJSON *params, void *userdata);
 

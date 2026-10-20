@@ -573,6 +573,15 @@ handle_request(const cJSON *req, struct mcp_client *client)
 		free(inner_str);
 		cJSON_AddItemToArray(content, item);
 		cJSON_AddItemToObject(result, "content", content);
+		// A tool-level failure (bad arguments, app refused) is a RESULT with
+		// isError:true, not a JSON-RPC error — MCP's CallToolResult.isError, so
+		// the agent sees the message and can retry with other arguments.
+		// Handlers flag it by returning an object whose top-level "isError" is
+		// true (spec §10.6); the payload still travels in content/structured.
+		const cJSON *is_error = cJSON_IsObject(inner) ? cJSON_GetObjectItemCaseSensitive(inner, "isError") : NULL;
+		if (cJSON_IsTrue(is_error)) {
+			cJSON_AddTrueToObject(result, "isError");
+		}
 		// Also expose the structured result for programmatic consumers.
 		cJSON_AddItemToObject(result, "structured", inner);
 		return jsonrpc_result(id, result);
