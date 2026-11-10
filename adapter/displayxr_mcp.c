@@ -38,7 +38,9 @@ usage(const char *argv0)
 {
 	fprintf(stderr,
 	        "usage: %s [--target <auto|workspace|<role>|pid:N>] [--expose-diagnostics] | --pid <N|auto> | --list\n"
-	        "  --target auto      try known roles (shell, service), then unique PID session (default)\n"
+	        "  --target auto      try known roles (shell, service), then unique PID session (default);\n"
+	        "                     with no unique session, run as the workspace aggregator\n"
+	        "                     (diagnostics exposed) so apps started later still join\n"
 	        "  --target workspace aggregate the shell + every per-PID app session behind one\n"
 	        "                     MCP connection with <app-id>__<tool> namespacing; membership\n"
 	        "                     mirrors live (apps joining/leaving emit tools/list_changed)\n"
@@ -197,13 +199,21 @@ main(int argc, char **argv)
 		if (conn == NULL) {
 			long pids[64];
 			size_t n = mcp_enumerate_sessions(pids, 64);
-			if (n == 0) {
-				fprintf(stderr, "displayxr-mcp: no running MCP sessions found\n");
-				return 1;
-			}
-			if (n > 1) {
-				fprintf(stderr, "displayxr-mcp: %zu sessions found, pass --target pid:N explicitly\n", n);
-				return 1;
+			if (n != 1) {
+				// No unique session to bridge 1:1. Exiting here made MCP
+				// clients that spawn the adapter once at startup (Claude
+				// Code) show the server as failed whenever no app was
+				// running yet, or when several were, until a manual
+				// reconnect. Serve as the workspace aggregator instead: it
+				// answers initialize itself, picks up apps as they start
+				// and emits tools/list_changed. Tools are then named
+				// <app-id>__<tool>. Diagnostics stay exposed, as they are
+				// over a 1:1 pid bridge.
+				fprintf(stderr,
+				        "displayxr-mcp: %zu app sessions and no shell/service endpoint; "
+				        "serving as the workspace aggregator (apps join as they start)\n",
+				        n);
+				return workspace_aggregator_run(true);
 			}
 			conn = mcp_conn_connect(pids[0]);
 			static char buf[32];
