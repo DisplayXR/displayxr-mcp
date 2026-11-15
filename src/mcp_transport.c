@@ -97,6 +97,9 @@ suppress_sigpipe(int fd)
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0
 #endif
+#ifndef MSG_DONTWAIT
+#define MSG_DONTWAIT 0
+#endif
 
 static void
 build_sock_path(char *out, size_t cap, long pid)
@@ -419,11 +422,15 @@ mcp_conn_write_bounded(struct mcp_conn *conn, const void *buf, size_t len, uint3
 			mcp_conn_abort(conn);
 			return false;
 		}
-		ssize_t n = send(conn->fd, p, len, MSG_NOSIGNAL);
+		// Non-blocking send: POLLOUT only promises *some* buffer space, and
+		// a blocking send() of a larger remainder would sleep past the
+		// deadline. A short or EAGAIN send loops back to the deadline
+		// check and poll().
+		ssize_t n = send(conn->fd, p, len, MSG_NOSIGNAL | MSG_DONTWAIT);
+		if (n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
+			continue;
+		}
 		if (n <= 0) {
-			if (n < 0 && errno == EINTR) {
-				continue;
-			}
 			mcp_conn_abort(conn);
 			return false;
 		}
@@ -602,8 +609,79 @@ struct mcp_listener
 struct mcp_conn
 {
 	HANDLE pipe;
+	//! Manual-reset; set by mcp_conn_abort(). Every overlapped wait waits
+	//! on it next to its own completion event, so an abort that lands
+	//! between the aborted check and the I/O going pending still wakes it.
+	HANDLE abort_event;
 	volatile LONG aborted;
 };
+
+//! Wrap an owned pipe handle. Closes @p pipe and returns NULL on failure.
+static struct mcp_conn *
+conn_new(HANDLE pipe)
+{
+	HANDLE ev = CreateEventA(NULL, TRUE, FALSE, NULL);
+	struct mcp_conn *c = ev != NULL ? MCP_TYPED_CALLOC(struct mcp_conn) : NULL;
+	if (c == NULL) {
+		if (ev != NULL) {
+			CloseHandle(ev);
+		}
+		DisconnectNamedPipe(pipe);
+		CloseHandle(pipe);
+		return NULL;
+	}
+	c->pipe = pipe;
+	c->abort_event = ev;
+	return c;
+}
+
+enum conn_io_result
+{
+	CONN_IO_OK,
+	CONN_IO_FAILED,  //!< Error, EOF, or aborted.
+	CONN_IO_TIMEOUT, //!< @p timeout_ms elapsed; the I/O was cancelled.
+};
+
+/*!
+ * One overlapped ReadFile/WriteFile, waited on together with the
+ * conn's abort event. On abort or timeout the I/O is cancelled and
+ * reaped before returning (the OVERLAPPED lives on this stack), so no
+ * I/O is ever left pending on a handle the caller may close.
+ */
+static enum conn_io_result
+conn_io(struct mcp_conn *conn, bool write, void *buf, DWORD len, DWORD *done, DWORD timeout_ms)
+{
+	*done = 0;
+	if (InterlockedCompareExchange(&conn->aborted, 0, 0)) {
+		return CONN_IO_FAILED; // Aborted by another thread; don't issue I/O.
+	}
+	OVERLAPPED ov = {0};
+	ov.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
+	if (ov.hEvent == NULL) {
+		return CONN_IO_FAILED;
+	}
+	BOOL ok = write ? WriteFile(conn->pipe, buf, len, done, &ov) : ReadFile(conn->pipe, buf, len, done, &ov);
+	enum conn_io_result res = CONN_IO_OK;
+	if (!ok && GetLastError() == ERROR_IO_PENDING) {
+		HANDLE waits[2] = {ov.hEvent, conn->abort_event};
+		DWORD wr = WaitForMultipleObjects(2, waits, FALSE, timeout_ms);
+		if (wr == WAIT_OBJECT_0) {
+			ok = GetOverlappedResult(conn->pipe, &ov, done, FALSE);
+		} else {
+			// Aborted or timed out: cancel, then wait for the cancelled
+			// (possibly partly completed) I/O before ov goes out of scope.
+			CancelIoEx(conn->pipe, &ov);
+			(void)GetOverlappedResult(conn->pipe, &ov, done, TRUE);
+			ok = FALSE;
+			res = wr == WAIT_TIMEOUT ? CONN_IO_TIMEOUT : CONN_IO_FAILED;
+		}
+	}
+	CloseHandle(ov.hEvent);
+	if (res == CONN_IO_OK && (!ok || *done == 0)) {
+		res = CONN_IO_FAILED;
+	}
+	return res;
+}
 
 static void
 build_pipe_name(char *out, size_t cap, long pid)
@@ -747,9 +825,7 @@ mcp_listener_accept(struct mcp_listener *listener)
 		MCP_LOG_W(LOG_PFX "CreateNamedPipe(%s) re-arm failed: %lu", listener->name, GetLastError());
 	}
 
-	struct mcp_conn *c = MCP_TYPED_CALLOC(struct mcp_conn);
-	c->pipe = connected;
-	return c;
+	return conn_new(connected);
 }
 
 void
@@ -792,19 +868,9 @@ mcp_conn_read(struct mcp_conn *conn, void *buf, size_t len)
 	}
 	char *p = buf;
 	while (len > 0) {
-		if (InterlockedCompareExchange(&conn->aborted, 0, 0)) {
-			return false; // Aborted by another thread; don't re-issue I/O.
-		}
-		OVERLAPPED ov = {0};
-		ov.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
+		DWORD chunk = len > 0x40000000u ? 0x40000000u : (DWORD)len;
 		DWORD got = 0;
-		BOOL ok = ReadFile(conn->pipe, p, (DWORD)len, &got, &ov);
-		if (!ok && GetLastError() == ERROR_IO_PENDING) {
-			WaitForSingleObject(ov.hEvent, INFINITE);
-			ok = GetOverlappedResult(conn->pipe, &ov, &got, FALSE);
-		}
-		CloseHandle(ov.hEvent);
-		if (!ok || got == 0) {
+		if (conn_io(conn, false, p, chunk, &got, INFINITE) != CONN_IO_OK) {
 			return false;
 		}
 		p += got;
@@ -821,19 +887,9 @@ mcp_conn_write(struct mcp_conn *conn, const void *buf, size_t len)
 	}
 	const char *p = buf;
 	while (len > 0) {
-		if (InterlockedCompareExchange(&conn->aborted, 0, 0)) {
-			return false; // Aborted by another thread; don't re-issue I/O.
-		}
-		OVERLAPPED ov = {0};
-		ov.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
+		DWORD chunk = len > 0x40000000u ? 0x40000000u : (DWORD)len;
 		DWORD wrote = 0;
-		BOOL ok = WriteFile(conn->pipe, p, (DWORD)len, &wrote, &ov);
-		if (!ok && GetLastError() == ERROR_IO_PENDING) {
-			WaitForSingleObject(ov.hEvent, INFINITE);
-			ok = GetOverlappedResult(conn->pipe, &ov, &wrote, FALSE);
-		}
-		CloseHandle(ov.hEvent);
-		if (!ok || wrote == 0) {
+		if (conn_io(conn, true, (void *)p, chunk, &wrote, INFINITE) != CONN_IO_OK) {
 			return false;
 		}
 		p += wrote;
@@ -861,25 +917,11 @@ mcp_conn_write_bounded(struct mcp_conn *conn, const void *buf, size_t len, uint3
 			mcp_conn_abort(conn); // partial frame => stream unusable
 			return false;
 		}
-		OVERLAPPED ov = {0};
-		ov.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
+		DWORD chunk = len > 0x40000000u ? 0x40000000u : (DWORD)len;
 		DWORD wrote = 0;
-		BOOL ok = WriteFile(conn->pipe, p, (DWORD)len, &wrote, &ov);
-		if (!ok && GetLastError() == ERROR_IO_PENDING) {
-			DWORD wr = WaitForSingleObject(ov.hEvent, (DWORD)(deadline - now));
-			if (wr != WAIT_OBJECT_0) {
-				// Timed out mid-write: cancel, harvest the (possibly
-				// partial) completion, poison the stream.
-				CancelIoEx(conn->pipe, &ov);
-				GetOverlappedResult(conn->pipe, &ov, &wrote, TRUE);
-				CloseHandle(ov.hEvent);
-				mcp_conn_abort(conn);
-				return false;
-			}
-			ok = GetOverlappedResult(conn->pipe, &ov, &wrote, FALSE);
-		}
-		CloseHandle(ov.hEvent);
-		if (!ok || wrote == 0) {
+		// Any failure, timeout included, may have left a partial frame:
+		// poison the stream (conn_io already cancelled and reaped).
+		if (conn_io(conn, true, (void *)p, chunk, &wrote, (DWORD)(deadline - now)) != CONN_IO_OK) {
 			mcp_conn_abort(conn);
 			return false;
 		}
@@ -896,8 +938,10 @@ mcp_conn_abort(struct mcp_conn *conn)
 		return;
 	}
 	// Poison first so a reader that wakes and loops fails its flag
-	// check instead of re-issuing ReadFile on the still-open handle.
+	// check instead of re-issuing ReadFile on the still-open handle;
+	// the event wakes a wait whose I/O went pending after that check.
 	InterlockedExchange(&conn->aborted, 1);
+	SetEvent(conn->abort_event);
 	CancelIoEx(conn->pipe, NULL);
 }
 
@@ -915,6 +959,7 @@ mcp_conn_close(struct mcp_conn *conn)
 		// and avoids waiting on a remote client that has gone silent
 		// without sending FIN.
 		InterlockedExchange(&conn->aborted, 1);
+		SetEvent(conn->abort_event);
 		CancelIoEx(conn->pipe, NULL);
 		// Every conn owns its handle since the multi-instance rework:
 		// server-side conns receive the connected instance from
@@ -922,6 +967,7 @@ mcp_conn_close(struct mcp_conn *conn)
 		DisconnectNamedPipe(conn->pipe);
 		CloseHandle(conn->pipe);
 	}
+	CloseHandle(conn->abort_event);
 	free(conn);
 }
 
@@ -945,9 +991,7 @@ conn_connect_pipe_name(const char *name)
 	}
 	DWORD mode = PIPE_READMODE_BYTE;
 	(void)SetNamedPipeHandleState(h, &mode, NULL, NULL);
-	struct mcp_conn *c = MCP_TYPED_CALLOC(struct mcp_conn);
-	c->pipe = h;
-	return c;
+	return conn_new(h);
 }
 
 struct mcp_conn *
