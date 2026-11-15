@@ -131,6 +131,11 @@ mcp_conn_fd(struct mcp_conn *conn);
 /*!
  * Enumerate running MCP sessions by scanning for socket files.
  * Fills @p out_pids (up to @p cap entries), returns count found.
+ *
+ * POSIX: a socket whose PID no longer exists (kill(pid, 0) fails with
+ * ESRCH, e.g. a process that was killed before it could unlink it) is
+ * skipped and its file removed, best effort. Named-role sockets are
+ * never listed or removed.
  */
 size_t
 mcp_enumerate_sessions(long *out_pids, size_t cap);

@@ -12,6 +12,7 @@
  *   - tools/call mock_fail (a tool error: result.isError, message kept)
  *   - registry de-dup (#30): a re-registered tool is listed once, and a
  *     different tool under a taken name is rejected
+ *   - session enumeration skips and prunes a dead PID's socket (#31)
  *
  * Runs twice: once speaking the MCP stdio transport (newline-delimited
  * JSON — what Claude Code and every spec-conformant client send), once
@@ -27,6 +28,7 @@
  */
 
 #include <displayxr_mcp/mcp_server.h>
+#include <displayxr_mcp/mcp_transport.h>
 
 #include <cjson/cJSON.h>
 
@@ -36,6 +38,7 @@
 #include <stdlib.h>
 #include <strings.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -314,6 +317,53 @@ run_ndjson(const char *adapter)
 	return failures;
 }
 
+// #31: a socket file left by a process that died without unlinking it must
+// not be listed as a session, and is pruned. Named-role sockets are kept.
+static int
+check_stale_socket_pruned(void)
+{
+	printf("--- stale socket pruning ---\n");
+	pid_t child = fork();
+	if (child == 0) {
+		_exit(0);
+	}
+	int status = 0;
+	waitpid(child, &status, 0); // reaped: kill(child, 0) now fails with ESRCH
+
+	char path[128];
+	snprintf(path, sizeof(path), "/tmp/displayxr-mcp-%ld.sock", (long)child);
+	FILE *f = fopen(path, "w");
+	if (f == NULL) {
+		fprintf(stderr, "FAIL: stale socket: cannot create %s\n", path);
+		return 1;
+	}
+	fclose(f);
+
+	long pids[256];
+	size_t n = mcp_enumerate_sessions(pids, 256);
+	int failures = 0;
+	for (size_t i = 0; i < n; i++) {
+		if (pids[i] == (long)child) {
+			fprintf(stderr, "FAIL: stale socket: dead pid %ld listed as a session\n", (long)child);
+			failures++;
+		}
+	}
+	struct stat st;
+	if (stat(path, &st) == 0) {
+		fprintf(stderr, "FAIL: stale socket: %s was not pruned\n", path);
+		unlink(path);
+		failures++;
+	}
+	if (stat("/tmp/displayxr-mcp-smoke.sock", &st) != 0) {
+		fprintf(stderr, "FAIL: stale socket: the named-role smoke socket was removed\n");
+		failures++;
+	}
+	if (failures == 0) {
+		printf("  ok: dead-pid socket skipped and pruned; named-role socket kept\n");
+	}
+	return failures;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -455,6 +505,7 @@ main(int argc, char **argv)
 	waitpid(pid, &status, 0);
 
 	failures += run_ndjson(adapter);
+	failures += check_stale_socket_pruned();
 
 	mcp_server_stop();
 
