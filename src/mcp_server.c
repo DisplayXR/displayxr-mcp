@@ -579,9 +579,12 @@ handle_request(const cJSON *req, struct mcp_client *client)
 		cJSON_AddItemToObject(result, "serverInfo", info);
 		// Mark the client notification-eligible only once it has done
 		// the MCP handshake — pre-initialize notifications confuse
-		// strict clients.
+		// strict clients. Under conns_mutex: broadcast_notification()
+		// reads the flag under it from other threads.
 		if (client != NULL) {
+			pthread_mutex_lock(&g_server.conns_mutex);
 			client->initialized = true;
+			pthread_mutex_unlock(&g_server.conns_mutex);
 		}
 		return jsonrpc_result(id, result);
 	}
