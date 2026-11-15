@@ -18,6 +18,13 @@
  *  - poll: membership discovery; spawns one setup thread per candidate
  *    so a hung backend can never stall discovery.
  *  - per-backend reader: routes responses + notifications upstream.
+ *
+ * Locking: g.lock guards the tables and is never held across backend
+ * I/O. A write to a backend takes only that backend's write_mutex,
+ * holding a reference (backend.refs) so the slot and its conn outlive
+ * the unlocked write even if the reader tears the backend down
+ * meanwhile; the last reference frees it. One slow app therefore
+ * stalls only the calls routed to it.
  */
 
 #include "stdio_framing.h"
@@ -70,6 +77,8 @@ struct backend
 	pthread_t reader;
 	pthread_mutex_t write_mutex;
 	cJSON *tools;      //!< Cached tools array (backend-side names).
+	int refs;          //!< Writers using conn outside g.lock (see backend_ref).
+	bool dead;         //!< Reader gone; the slot is freed when refs drops to 0.
 };
 
 enum inflight_kind
@@ -399,7 +408,52 @@ tool_exposed(const cJSON *tool_entry)
 
 // ---------------------------------------------------------------- backend teardown
 
-// Caller holds g.lock. Fails outstanding agent calls, frees the slot.
+// Caller holds g.lock; refs == 0. Closes the conn and frees the slot.
+static void
+backend_free_locked(int idx)
+{
+	struct backend *b = &g.backends[idx];
+	if (b->tools != NULL) {
+		cJSON_Delete(b->tools);
+	}
+	struct mcp_conn *conn = b->conn;
+	pthread_mutex_destroy(&b->write_mutex);
+	memset(b, 0, sizeof(*b));
+	// Nobody else can be using the conn: the reader has exited (or never
+	// started) and no writer holds a reference.
+	if (conn != NULL) {
+		mcp_conn_close(conn);
+	}
+}
+
+/*!
+ * Caller holds g.lock. Take a reference that keeps the slot, its conn
+ * and its write_mutex valid while the caller writes WITHOUT g.lock.
+ * Release with backend_unref().
+ */
+static void
+backend_ref_locked(int idx)
+{
+	g.backends[idx].refs++;
+}
+
+static void
+backend_unref(int idx)
+{
+	pthread_mutex_lock(&g.lock);
+	struct backend *b = &g.backends[idx];
+	if (--b->refs == 0 && b->dead) {
+		backend_free_locked(idx);
+	}
+	pthread_mutex_unlock(&g.lock);
+}
+
+/*!
+ * Caller holds g.lock. Fails outstanding agent calls and retires the
+ * slot: it is freed now if no writer holds a reference, else by the
+ * last backend_unref(). Until then it stays `used` (not reused, and the
+ * pid stays known to the poller) but not `alive` (no new calls).
+ */
 static void
 backend_teardown_locked(int idx)
 {
@@ -417,16 +471,43 @@ backend_teardown_locked(int idx)
 		}
 		inflight_release(fl);
 	}
-	if (b->tools != NULL) {
-		cJSON_Delete(b->tools);
+	b->alive = false;
+	b->dead = true;
+	if (b->refs == 0) {
+		backend_free_locked(idx);
 	}
+}
+
+/*!
+ * Write @p req to backend @p idx outside g.lock. Caller holds g.lock and
+ * has allocated the in-flight entry @p local_id; g.lock is RELEASED on
+ * return. On failure the entry is released, unless teardown already
+ * answered it. Returns whether the write went through.
+ */
+static bool
+backend_write_unlocked(int idx, const char *req, uint64_t local_id)
+{
+	struct backend *b = &g.backends[idx];
 	struct mcp_conn *conn = b->conn;
-	memset(b, 0, sizeof(*b));
-	// Close outside nothing — reader thread is the only user and it is
-	// the caller's context (or already gone); safe to close here.
-	if (conn != NULL) {
-		mcp_conn_close(conn);
+	backend_ref_locked(idx);
+	pthread_mutex_unlock(&g.lock);
+
+	pthread_mutex_lock(&b->write_mutex);
+	bool ok = req != NULL && write_frame_conn(conn, req);
+	pthread_mutex_unlock(&b->write_mutex);
+
+	if (!ok) {
+		pthread_mutex_lock(&g.lock);
+		struct inflight *fl = inflight_find(local_id);
+		if (fl != NULL && fl->backend == idx) {
+			inflight_release(fl);
+		} else {
+			ok = true; // Teardown already failed this call to the agent.
+		}
+		pthread_mutex_unlock(&g.lock);
 	}
+	backend_unref(idx);
+	return ok;
 }
 
 // ---------------------------------------------------------------- backend reader
@@ -449,13 +530,7 @@ refresh_backend_tools(int idx)
 	snprintf(req, sizeof(req),
 	         "{\"jsonrpc\":\"2.0\",\"id\":%llu,\"method\":\"tools/list\"}",
 	         (unsigned long long)fl->local_id);
-	pthread_mutex_lock(&b->write_mutex);
-	bool ok = write_frame_conn(b->conn, req);
-	pthread_mutex_unlock(&b->write_mutex);
-	if (!ok) {
-		inflight_release(fl);
-	}
-	pthread_mutex_unlock(&g.lock);
+	(void)backend_write_unlocked(idx, req, fl->local_id); // Drops g.lock.
 }
 
 /*!
@@ -1005,11 +1080,12 @@ handle_tools_call(const cJSON *id, const cJSON *params)
 		free(err);
 		return;
 	}
+	uint64_t local_id = fl->local_id;
 
 	// Rebuild the request with the bare tool name + our local id.
 	cJSON *fwd = cJSON_CreateObject();
 	cJSON_AddStringToObject(fwd, "jsonrpc", "2.0");
-	cJSON_AddNumberToObject(fwd, "id", (double)fl->local_id);
+	cJSON_AddNumberToObject(fwd, "id", (double)local_id);
 	cJSON_AddStringToObject(fwd, "method", "tools/call");
 	cJSON *fparams = cJSON_CreateObject();
 	cJSON_AddStringToObject(fparams, "name", bare);
@@ -1021,21 +1097,17 @@ handle_tools_call(const cJSON *id, const cJSON *params)
 	char *fwd_str = cJSON_PrintUnformatted(fwd);
 	cJSON_Delete(fwd);
 
-	pthread_mutex_lock(&b->write_mutex);
-	bool ok = fwd_str != NULL && write_frame_conn(b->conn, fwd_str);
-	pthread_mutex_unlock(&b->write_mutex);
+	// Only this backend's write_mutex is held for the I/O: a backend
+	// that stops reading stalls calls to it, not every app's traffic.
+	bool ok = backend_write_unlocked(idx, fwd_str, local_id); // Drops g.lock.
 	free(fwd_str);
 
 	if (!ok) {
-		inflight_release(fl);
-		pthread_mutex_unlock(&g.lock);
 		char *err = jsonrpc_error_str(id, -32000, "backend write failed");
 		write_frame_stdout(err);
 		free(err);
-		return;
 	}
-	pthread_mutex_unlock(&g.lock);
-	// Response is relayed asynchronously by the backend reader.
+	// Otherwise the response is relayed asynchronously by the reader.
 }
 
 static void
