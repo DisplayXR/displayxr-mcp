@@ -283,6 +283,7 @@ jobs:
             -DVCPKG_TARGET_TRIPLET=x64-windows `
             -DDISPLAYXR_MCP_USE_VENDORED_CJSON=ON `
             -DDISPLAYXR_MCP_BUILD_INSTALLER=ON `
+            -DDISPLAYXR_MCP_BUILD_TESTS=ON `
             "-DBUILD_NUM=${{ github.run_number }}"
 
       - name: Build
@@ -292,6 +293,14 @@ jobs:
       - name: Test (POSIX)
         if: matrix.os != 'windows-latest'
         run: ctest --test-dir build --output-on-failure
+
+      # Multi-config (Visual Studio) generator: -C picks the built config.
+      # smoke/v040 fork the adapter and are POSIX-only; this runs the
+      # portable ones (transport = named-pipe server round trip + stop
+      # paths, stdio_framing).
+      - name: Test (Windows)
+        if: matrix.os == 'windows-latest'
+        run: ctest --test-dir build -C Release --output-on-failure --timeout 120
 
       # Regression guard against shipping a .pkg that's missing the
       # adapter binary or the capability marker files. Mirrors the

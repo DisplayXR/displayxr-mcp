@@ -79,7 +79,8 @@ env override), the tool conventions, and the named-pipe topology.
 | `external/cjson/` | Vendored cJSON. The framework reuses parent project's `cJSON::cJSON` target if one exists; falls back to this. |
 | `installer/DisplayXRMCPInstaller.nsi` | NSIS installer for the adapter binary + Capabilities registry registration. |
 | `adapter/stdio_framing.c` | Agent-side stdio framing: ndjson (MCP stdio transport) with legacy Content-Length auto-detect; Content-Length frame I/O on the server connection. |
-| `tests/smoke_test.c` | ctest binary that exercises the wire protocol end-to-end, in both stdio framings. Runs on every CI build. |
+| `tests/smoke_test.c` | ctest binary that exercises the wire protocol end-to-end, in both stdio framings. POSIX only (forks the adapter); runs on the ubuntu + macOS CI legs. |
+| `tests/transport_test.c` | Portable in-process server ↔ transport test (named pipe on Windows): initialize + tools/list, stop with clients connected, stop while a client connects. The test that runs on the Windows CI leg. |
 | `tests/stdio_framing_test.c` | In-memory unit test of the stdio framing (UTF-8, every split point). |
 | `docs/mcp-spec.md` | The product/protocol spec. **Update this if you change tool conventions or transport.** |
 

@@ -152,13 +152,23 @@ if(DISPLAYXR_MCP_BUILD_TESTS)
         message(FATAL_ERROR "DISPLAYXR_MCP_BUILD_TESTS requires DISPLAYXR_MCP_BUILD_ADAPTER (the smoke test forks the adapter as a subprocess).")
     endif()
     enable_testing()
-    add_executable(displayxr_mcp_smoke tests/smoke_test.c)
-    target_link_libraries(displayxr_mcp_smoke PRIVATE displayxr_mcp)
-    add_test(NAME smoke COMMAND displayxr_mcp_smoke $<TARGET_FILE:displayxr_mcp_adapter>)
+    # smoke + v040 fork the adapter (fork/pipe/waitpid): POSIX only.
+    if(NOT WIN32)
+        add_executable(displayxr_mcp_smoke tests/smoke_test.c)
+        target_link_libraries(displayxr_mcp_smoke PRIVATE displayxr_mcp)
+        add_test(NAME smoke COMMAND displayxr_mcp_smoke $<TARGET_FILE:displayxr_mcp_adapter>)
 
-    add_executable(displayxr_mcp_v040 tests/v040_test.c)
-    target_link_libraries(displayxr_mcp_v040 PRIVATE displayxr_mcp)
-    add_test(NAME v040 COMMAND displayxr_mcp_v040 $<TARGET_FILE:displayxr_mcp_adapter>)
+        add_executable(displayxr_mcp_v040 tests/v040_test.c)
+        target_link_libraries(displayxr_mcp_v040 PRIVATE displayxr_mcp)
+        add_test(NAME v040 COMMAND displayxr_mcp_v040 $<TARGET_FILE:displayxr_mcp_adapter>)
+    endif()
+
+    # In-process server <-> transport round trip + stop paths. Portable:
+    # the only test that exercises the Windows named-pipe transport.
+    add_executable(displayxr_mcp_transport tests/transport_test.c)
+    target_link_libraries(displayxr_mcp_transport PRIVATE displayxr_mcp)
+    add_test(NAME transport COMMAND displayxr_mcp_transport)
+    set_tests_properties(transport PROPERTIES TIMEOUT 60)
 
     # Agent-side stdio framing (ndjson + legacy Content-Length), in-memory.
     add_executable(displayxr_mcp_stdio_framing tests/stdio_framing_test.c adapter/stdio_framing.c)
