@@ -19,6 +19,7 @@
 #ifndef _WIN32
 #include <dirent.h>
 #include <poll.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -370,8 +371,26 @@ mcp_enumerate_sessions(long *out_pids, size_t cap)
 		if (strcmp(name + nlen - slen, suffix) != 0) {
 			continue;
 		}
-		long pid = strtol(name + plen, NULL, 10);
+		char *end = NULL;
+		long pid = strtol(name + plen, &end, 10);
 		if (pid <= 0) {
+			// Named-role sockets (displayxr-mcp-shell.sock, ...) are not
+			// per-PID sessions; leave them alone.
+			continue;
+		}
+		// A socket file outlives a process that was killed before
+		// mcp_server_stop() could unlink it, so the name alone is not a
+		// live session. ESRCH = no such process: skip it and prune the
+		// file, best effort, so `--target auto` (which needs exactly one
+		// session) is not blocked by it forever (#31). EPERM means the
+		// process is alive under another user: still a session.
+		if ((long)(pid_t)pid == pid && kill((pid_t)pid, 0) != 0 && errno == ESRCH) {
+			// Only unlink a name that is exactly displayxr-mcp-<digits>.sock.
+			if (end == name + nlen - slen) {
+				char path[sizeof("/tmp/") + 256];
+				snprintf(path, sizeof(path), "/tmp/%s", name);
+				unlink(path);
+			}
 			continue;
 		}
 		out_pids[n++] = (long)pid;
