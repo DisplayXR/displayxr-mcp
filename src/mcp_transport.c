@@ -7,6 +7,12 @@
  */
 
 
+// struct ucred / SO_PEERCRED (peer credential check) need _GNU_SOURCE on
+// glibc and bionic, and it must be defined before the first system header.
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+
 #include "displayxr_mcp/mcp_transport.h"
 #include "displayxr_mcp/os_compat.h"
 #include "displayxr_mcp/os_compat.h"
@@ -84,6 +90,64 @@ build_sock_path_named(char *out, size_t cap, const char *role)
 	snprintf(out, cap, "%s%s%s", SOCK_PREFIX, role, SOCK_SUFFIX);
 }
 
+/*!
+ * The socket names live in the shared, world-writable /tmp and are
+ * predictable (pid or role), so another local user can create one first.
+ * Both ends therefore check who is on the other side:
+ *
+ * - connect: the path must be a socket (lstat, no symlink follow) owned
+ *   by our effective uid, and after connect() the peer's credentials must
+ *   be ours too (closes the swap-after-lstat race);
+ * - accept: the connecting peer must be our uid (closes the window
+ *   between bind() and chmod(0600), and any filesystem that ignores the
+ *   socket file mode).
+ */
+static bool
+peer_uid_is_ours(int fd)
+{
+#if defined(__linux__) && defined(SO_PEERCRED)
+	struct ucred cred;
+	socklen_t len = sizeof(cred);
+	if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) != 0 || len != sizeof(cred)) {
+		MCP_LOG_W(LOG_PFX "SO_PEERCRED failed: %s", strerror(errno));
+		return false;
+	}
+	return cred.uid == geteuid();
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+	uid_t uid = (uid_t)-1;
+	gid_t gid = (gid_t)-1;
+	if (getpeereid(fd, &uid, &gid) != 0) {
+		MCP_LOG_W(LOG_PFX "getpeereid failed: %s", strerror(errno));
+		return false;
+	}
+	return uid == geteuid();
+#else
+	// No peer-credential API known for this platform: rely on the
+	// ownership check of the socket path alone.
+	(void)fd;
+	return true;
+#endif
+}
+
+static bool
+sock_path_is_ours(const char *path)
+{
+	struct stat st;
+	if (lstat(path, &st) != 0) {
+		return false; // Not there (or not reachable): plain connect failure.
+	}
+	if (!S_ISSOCK(st.st_mode)) {
+		MCP_LOG_W(LOG_PFX "%s is not a socket; not connecting", path);
+		return false;
+	}
+	if (st.st_uid != geteuid()) {
+		MCP_LOG_W(LOG_PFX "%s is owned by uid %ld, not us (%ld); not connecting", path, (long)st.st_uid,
+		          (long)geteuid());
+		return false;
+	}
+	return true;
+}
+
 static struct mcp_listener *
 listener_open_path(const char *path)
 {
@@ -112,7 +176,15 @@ listener_open_path(const char *path)
 		return NULL;
 	}
 
-	(void)chmod(l->path, 0600);
+	// Owner-only. A failure here would leave the socket reachable by
+	// whatever the umask allowed, so treat it as fatal.
+	if (chmod(l->path, 0600) != 0) {
+		MCP_LOG_W(LOG_PFX "chmod(%s, 0600) failed: %s", l->path, strerror(errno));
+		close(fd);
+		(void)unlink(l->path);
+		free(l);
+		return NULL;
+	}
 
 	if (listen(fd, 4) != 0) {
 		MCP_LOG_W(LOG_PFX "listen() failed: %s", strerror(errno));
@@ -152,9 +224,19 @@ mcp_listener_accept(struct mcp_listener *listener)
 	if (listener == NULL || listener->fd < 0) {
 		return NULL;
 	}
-	int cfd = accept(listener->fd, NULL, NULL);
-	if (cfd < 0) {
-		return NULL;
+	int cfd = -1;
+	for (;;) {
+		cfd = accept(listener->fd, NULL, NULL);
+		if (cfd < 0) {
+			return NULL;
+		}
+		if (peer_uid_is_ours(cfd)) {
+			break;
+		}
+		// Another user's process: drop it and keep listening, so a
+		// stranger's connect can neither talk to us nor stop the server.
+		MCP_LOG_W(LOG_PFX "rejected a connection from another user on %s", listener->path);
+		close(cfd);
 	}
 	suppress_sigpipe(cfd);
 	struct mcp_conn *c = MCP_TYPED_CALLOC(struct mcp_conn);
@@ -310,6 +392,9 @@ mcp_conn_fd(struct mcp_conn *conn)
 static struct mcp_conn *
 conn_connect_path(const char *path)
 {
+	if (!sock_path_is_ours(path)) {
+		return NULL;
+	}
 	int fd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (fd < 0) {
 		return NULL;
@@ -318,6 +403,11 @@ conn_connect_path(const char *path)
 	addr.sun_family = AF_UNIX;
 	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", path);
 	if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+		close(fd);
+		return NULL;
+	}
+	if (!peer_uid_is_ours(fd)) {
+		MCP_LOG_W(LOG_PFX "%s: the listening process is another user's; not connecting", path);
 		close(fd);
 		return NULL;
 	}
