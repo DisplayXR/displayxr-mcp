@@ -53,12 +53,27 @@ usage(const char *argv0)
 	        argv0);
 }
 
+/*!
+ * Which pump finished first. The bridge ends when EITHER side closes:
+ * stdin EOF (the client went away) or the server connection closing
+ * (the app exited / stopped its server). Waiting on stdin alone left
+ * the adapter up, silently, with nothing behind it.
+ */
+struct pump_done
+{
+	pthread_mutex_t mutex;
+	pthread_cond_t cond;
+	bool up_done;   //!< stdin -> conn pump returned.
+	bool down_done; //!< conn -> stdout pump returned.
+};
+
 // Thread args: pump stdin→conn or conn→stdout.
 struct pump_args
 {
 	struct mcp_conn *conn;
 	bool stdin_to_conn;
 	struct dxr_stdio_framing_latch *latch;
+	struct pump_done *done;
 };
 
 static void *
@@ -102,6 +117,14 @@ pump_thread(void *arg)
 			}
 		}
 	}
+	pthread_mutex_lock(&a->done->mutex);
+	if (a->stdin_to_conn) {
+		a->done->up_done = true;
+	} else {
+		a->done->down_done = true;
+	}
+	pthread_cond_broadcast(&a->done->cond);
+	pthread_mutex_unlock(&a->done->mutex);
 	return NULL;
 }
 
@@ -234,16 +257,36 @@ main(int argc, char **argv)
 
 	static struct dxr_stdio_framing_latch latch;
 	dxr_stdio_framing_latch_init(&latch);
-	struct pump_args up = {.conn = conn, .stdin_to_conn = true, .latch = &latch};
-	struct pump_args down = {.conn = conn, .stdin_to_conn = false, .latch = &latch};
+	static struct pump_done done;
+	pthread_mutex_init(&done.mutex, NULL);
+	pthread_cond_init(&done.cond, NULL);
+	struct pump_args up = {.conn = conn, .stdin_to_conn = true, .latch = &latch, .done = &done};
+	struct pump_args down = {.conn = conn, .stdin_to_conn = false, .latch = &latch, .done = &done};
 
 	pthread_t t_up, t_down;
 	pthread_create(&t_up, NULL, pump_thread, &up);
 	pthread_create(&t_down, NULL, pump_thread, &down);
 
-	// When the stdin-side thread exits (client closed stdin), abort the
-	// connection so the conn-side thread unblocks its read. Unblock a
-	// writer still waiting for the framing (client sent nothing) too.
+	pthread_mutex_lock(&done.mutex);
+	while (!done.up_done && !done.down_done) {
+		pthread_cond_wait(&done.cond, &done.mutex);
+	}
+	bool server_closed = done.down_done;
+	pthread_mutex_unlock(&done.mutex);
+
+	if (server_closed) {
+		// The server side closed (or stdout failed). The stdin pump is
+		// parked in a blocking read of stdin that cannot be woken
+		// portably; returning from main ends the process, which is the
+		// point: the client sees EOF on our stdout and can reconnect.
+		fprintf(stderr, "displayxr-mcp: %s closed the connection; exiting\n", connected_label);
+		fflush(stdout);
+		return 0;
+	}
+
+	// The stdin side ended (client closed stdin): abort the connection so
+	// the conn-side thread unblocks its read. Unblock a writer still
+	// waiting for the framing (client sent nothing) too.
 	pthread_join(t_up, NULL);
 	dxr_stdio_framing_latch_set(&latch, DXR_STDIO_FRAMING_NDJSON);
 	mcp_conn_abort(conn);
