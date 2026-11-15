@@ -558,20 +558,32 @@ mcp_enumerate_sessions(long *out_pids, size_t cap)
 			// per-PID sessions; leave them alone.
 			continue;
 		}
+		// Only our own sockets are sessions: connect refuses anything
+		// that is not a socket owned by our uid (sock_path_is_ours), so
+		// listing another user's would make `--target auto` count a
+		// session it can never reach, and the workspace aggregator retry
+		// it every poll. Check ownership the same way (lstat: no symlink
+		// follow), and never prune what is not ours.
+		char path[sizeof("/tmp/") + 256];
+		snprintf(path, sizeof(path), "/tmp/%s", name);
+		struct stat st;
+		if (lstat(path, &st) != 0 || st.st_uid != geteuid()) {
+			continue;
+		}
 		// A socket file outlives a process that was killed before
 		// mcp_server_stop() could unlink it, so the name alone is not a
 		// live session. ESRCH = no such process: skip it and prune the
 		// file, best effort, so `--target auto` (which needs exactly one
-		// session) is not blocked by it forever (#31). EPERM means the
-		// process is alive under another user: still a session.
+		// session) is not blocked by it forever (#31).
 		if ((long)(pid_t)pid == pid && kill((pid_t)pid, 0) != 0 && errno == ESRCH) {
 			// Only unlink a name that is exactly displayxr-mcp-<digits>.sock.
 			if (end == name + nlen - slen) {
-				char path[sizeof("/tmp/") + 256];
-				snprintf(path, sizeof(path), "/tmp/%s", name);
 				unlink(path);
 			}
 			continue;
+		}
+		if (!S_ISSOCK(st.st_mode)) {
+			continue; // Ours and a live pid, but nothing to connect to.
 		}
 		out_pids[n++] = (long)pid;
 	}
