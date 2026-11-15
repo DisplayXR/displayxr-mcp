@@ -498,6 +498,24 @@ main(int argc, char **argv)
 		free(body);
 	}
 
+	// 5. tail_log with a negative cursor: rejected as a tool argument
+	// error, not cast to a huge uint64_t.
+	send_frame(out, "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\","
+	                "\"params\":{\"name\":\"tail_log\",\"arguments\":{\"since\":-1}}}");
+	body = NULL;
+	if (recv_frame(in, &body) != 0) {
+		fprintf(stderr, "FAIL: no tools/call (tail_log since:-1) response\n");
+		failures++;
+	} else {
+		if (result_is_error(body) != 1 || strstr(body, "since") == NULL) {
+			fprintf(stderr, "FAIL: tail_log since:-1: expected result.isError=true naming 'since', got:\n%s\n", body);
+			failures++;
+		} else {
+			printf("  ok: tail_log since:-1 rejected as a tool argument error\n");
+		}
+		free(body);
+	}
+
 	// Tear down: close adapter stdin so it exits cleanly.
 	fclose(out);
 	fclose(in);

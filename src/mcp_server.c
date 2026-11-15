@@ -388,6 +388,39 @@ mcp_server_set_app_id(const char *app_id)
 
 // ---------- Built-in tail_log tool ----------
 
+/*!
+ * JSON number -> uint64_t, only when it is a non-negative integer that
+ * fits. A plain (uint64_t) cast of a negative, NaN or >= 2^64 double is
+ * undefined behaviour.
+ */
+static bool
+json_number_to_u64(const cJSON *n, uint64_t *out)
+{
+	if (!cJSON_IsNumber(n)) {
+		return false;
+	}
+	double v = n->valuedouble;
+	if (!(v >= 0.0 && v < 18446744073709551616.0)) { // Also rejects NaN.
+		return false;
+	}
+	uint64_t u = (uint64_t)v;
+	if ((double)u != v) {
+		return false; // Fractional.
+	}
+	*out = u;
+	return true;
+}
+
+//! A tool-level argument error (spec §10.6): result with isError:true.
+static cJSON *
+tool_arg_error(const char *message)
+{
+	cJSON *o = cJSON_CreateObject();
+	cJSON_AddTrueToObject(o, "isError");
+	cJSON_AddStringToObject(o, "error", message);
+	return o;
+}
+
 static cJSON *
 tool_tail_log(const cJSON *params, void *userdata)
 {
@@ -396,8 +429,8 @@ tool_tail_log(const cJSON *params, void *userdata)
 	size_t max_entries = 128;
 	if (params != NULL) {
 		const cJSON *s = cJSON_GetObjectItemCaseSensitive(params, "since");
-		if (cJSON_IsNumber(s)) {
-			since = (uint64_t)s->valuedouble;
+		if (s != NULL && !json_number_to_u64(s, &since)) {
+			return tool_arg_error("tail_log: 'since' must be a non-negative integer cursor");
 		}
 		const cJSON *m = cJSON_GetObjectItemCaseSensitive(params, "max");
 		if (cJSON_IsNumber(m)) {
