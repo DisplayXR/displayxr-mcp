@@ -392,21 +392,16 @@ main(int argc, char **argv)
 		failures += expect_substring(body, "\"mock_fail\"", "tools/list: tool registered after 100 duplicates present");
 		int n = count_substring(body, "\"mock_list_windows\"");
 		if (n != 1) {
-			fprintf(stderr, "FAIL: tools/list: mock_list_windows listed %d times, expected once:
-%s
-", n, body);
+			fprintf(stderr, "FAIL: tools/list: mock_list_windows listed %d times, expected once:\n%s\n", n, body);
 			failures++;
 		} else {
-			printf("  ok: tools/list: re-registered tool listed once
-");
+			printf("  ok: tools/list: re-registered tool listed once\n");
 		}
 		if (strstr(body, "Must never be listed") != NULL) {
-			fprintf(stderr, "FAIL: tools/list: the same-name impostor was registered
-");
+			fprintf(stderr, "FAIL: tools/list: the same-name impostor was registered\n");
 			failures++;
 		} else {
-			printf("  ok: tools/list: same-name impostor rejected
-");
+			printf("  ok: tools/list: same-name impostor rejected\n");
 		}
 		free(body);
 	}
@@ -422,8 +417,7 @@ main(int argc, char **argv)
 		failures += expect_substring(body, "\"mock_app\"", "tools/call: returned mock window name");
 		failures += expect_substring(body, "\"id\":42", "tools/call: returned mock window id");
 		if (strstr(body, "impostor") != NULL) {
-			fprintf(stderr, "FAIL: tools/call: dispatched to the same-name impostor
-");
+			fprintf(stderr, "FAIL: tools/call: dispatched to the same-name impostor\n");
 			failures++;
 		}
 		if (result_is_error(body) != 0) {
