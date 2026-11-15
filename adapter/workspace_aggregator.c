@@ -605,7 +605,17 @@ backend_reader(void *arg)
 		}
 
 		if (cJSON_IsNumber(id)) {
-			uint64_t local_id = (uint64_t)id->valuedouble;
+			// Our local ids are positive integers well below 2^53; anything
+			// else cannot match an in-flight entry. Range-check before the
+			// cast (a negative / NaN / huge double -> uint64_t is UB).
+			double idv = id->valuedouble;
+			uint64_t local_id = 0;
+			if (idv >= 1.0 && idv <= 9007199254740992.0) {
+				local_id = (uint64_t)idv;
+				if ((double)local_id != idv) {
+					local_id = 0;
+				}
+			}
 			pthread_mutex_lock(&g.lock);
 			struct inflight *fl = inflight_find(local_id);
 			enum inflight_kind kind = fl != NULL ? fl->kind : INFLIGHT_AGENT;
