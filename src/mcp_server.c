@@ -676,9 +676,11 @@ client_thread(void *arg)
 static void *
 server_thread(void *arg)
 {
-	(void)arg;
+	// The listener is passed in, not read from g_server: stop() frees it
+	// (and clears the pointer) only after this thread has been joined.
+	struct mcp_listener *listener = arg;
 	for (;;) {
-		struct mcp_conn *c = mcp_listener_accept(g_server.listener);
+		struct mcp_conn *c = mcp_listener_accept(listener);
 		if (c == NULL) {
 			return NULL; // listener closed.
 		}
@@ -728,7 +730,7 @@ start_with_listener(struct mcp_listener *listener, const char *endpoint_label)
 	}
 
 	g_server.listener = listener;
-	int rc = pthread_create(&g_server.thread, NULL, server_thread, NULL);
+	int rc = pthread_create(&g_server.thread, NULL, server_thread, listener);
 	if (rc != 0) {
 		MCP_LOG_W(LOG_PFX "pthread_create failed: %s", strerror(rc));
 		mcp_listener_close(g_server.listener);
@@ -830,10 +832,12 @@ mcp_server_stop(void)
 	if (!g_server.thread_started) {
 		return;
 	}
-	// 1. Stop accepting (wakes the accept thread).
+	// 1. Stop accepting: wake the accept thread, join it, and only then
+	//    free the listener — the accept thread reads it until it returns.
+	mcp_listener_shutdown(g_server.listener);
+	pthread_join(g_server.thread, NULL);
 	mcp_listener_close(g_server.listener);
 	g_server.listener = NULL;
-	pthread_join(g_server.thread, NULL);
 
 	// 2. Abort live connections — their serve threads wake, clear their
 	//    slots, and signal conns_drained. Abort (not close): ownership
