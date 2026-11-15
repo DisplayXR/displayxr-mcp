@@ -106,8 +106,9 @@ static struct
 	struct inflight inflight[MAX_INFLIGHT];
 	uint64_t next_local_id;
 
-	//! Sticky prefix registry — names are never reused for the lifetime
-	//! of the aggregator, so tool names stay stable mid-conversation.
+	//! Prefixes in use: one per live backend, plus the reserved names
+	//! ("shell", "workspace"). A backend keeps its prefix for as long as
+	//! it is connected; it is released when the backend goes away.
 	char *used_prefixes[MAX_PREFIXES];
 	size_t used_prefix_count;
 
@@ -231,11 +232,30 @@ prefix_in_use(const char *p)
 	return false;
 }
 
-static void
+static bool
 reserve_prefix(const char *p)
 {
-	if (g.used_prefix_count < MAX_PREFIXES) {
-		g.used_prefixes[g.used_prefix_count++] = strdup(p);
+	if (g.used_prefix_count >= MAX_PREFIXES) {
+		return false;
+	}
+	char *dup = strdup(p);
+	if (dup == NULL) {
+		return false;
+	}
+	g.used_prefixes[g.used_prefix_count++] = dup;
+	return true;
+}
+
+// Caller holds g.lock. No-op for a prefix that is not in the table.
+static void
+release_prefix(const char *p)
+{
+	for (size_t i = 0; i < g.used_prefix_count; i++) {
+		if (strcmp(g.used_prefixes[i], p) == 0) {
+			free(g.used_prefixes[i]);
+			g.used_prefixes[i] = g.used_prefixes[--g.used_prefix_count];
+			return;
+		}
 	}
 }
 
@@ -313,27 +333,27 @@ exe_basename_for_pid(long pid, char *out, size_t cap)
 }
 
 /*!
- * Assign a sticky prefix from a desired slug: bare name first, then
- * -2, -3, … on collision. Caller holds g.lock.
+ * Assign a prefix from a desired slug: bare name first, then -2, -3, …
+ * on collision. Caller holds g.lock and has released the backend's
+ * previous prefix, if any (so a re-prefix to the same slug keeps the
+ * bare name instead of colliding with itself).
+ *
+ * Every live prefix is in the table and the table holds at most
+ * MAX_BACKENDS + the reserved names (< MAX_PREFIXES), so one of the
+ * first MAX_PREFIXES suffixes is always free: no ambiguous fallback.
  */
 static void
 assign_prefix(const char *desired, char *out, size_t cap)
 {
-	if (!prefix_in_use(desired)) {
-		snprintf(out, cap, "%s", desired);
-		reserve_prefix(out);
-		return;
-	}
-	for (int n = 2; n < 100; n++) {
-		char candidate[48];
+	char candidate[48];
+	snprintf(candidate, sizeof(candidate), "%s", desired);
+	for (int n = 2; prefix_in_use(candidate) && n < MAX_PREFIXES + 2; n++) {
 		snprintf(candidate, sizeof(candidate), "%s-%d", desired, n);
-		if (!prefix_in_use(candidate)) {
-			snprintf(out, cap, "%s", candidate);
-			reserve_prefix(out);
-			return;
-		}
 	}
-	snprintf(out, cap, "%s-x", desired); // Pathological; accept ambiguity.
+	snprintf(out, cap, "%s", candidate);
+	if (!reserve_prefix(out)) {
+		fprintf(stderr, "displayxr-mcp: prefix table full; '%s' may be ambiguous\n", out);
+	}
 }
 
 // ---------------------------------------------------------------- in-flight map
@@ -458,6 +478,10 @@ static void
 backend_teardown_locked(int idx)
 {
 	struct backend *b = &g.backends[idx];
+	// Release the prefix now: a restarted app gets its bare name back.
+	if (!b->is_shell && b->prefix[0] != '\0') {
+		release_prefix(b->prefix);
+	}
 	for (size_t i = 0; i < MAX_INFLIGHT; i++) {
 		struct inflight *fl = &g.inflight[i];
 		if (!fl->used || fl->backend != idx) {
@@ -562,6 +586,10 @@ apply_tools_result(int idx, const cJSON *result)
 		snprintf(b->app_id, sizeof(b->app_id), "%s", app_id->valuestring);
 		char slug[40];
 		slugify(b->app_id, slug, sizeof(slug));
+		// Release our own prefix first: an app named "foo" after its exe
+		// whose app id then arrives as "foo" must keep "foo", not become
+		// "foo-2" by colliding with itself.
+		release_prefix(b->prefix);
 		assign_prefix(slug, b->prefix, sizeof(b->prefix));
 	}
 	pthread_mutex_unlock(&g.lock);
@@ -1188,6 +1216,10 @@ workspace_aggregator_run(bool expose_diagnostics)
 	pthread_mutex_init(&g.stdout_mutex, NULL);
 	dxr_stdio_framing_latch_init(&g.framing);
 	g.expose_diagnostics = expose_diagnostics;
+	// Never assigned to an app: "shell" is the shell's fixed prefix and
+	// "workspace" carries the aggregator's built-ins (workspace__list_apps).
+	reserve_prefix("shell");
+	reserve_prefix("workspace");
 
 	pthread_t poller;
 	if (pthread_create(&poller, NULL, poll_thread, NULL) != 0) {
