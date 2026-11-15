@@ -10,6 +10,8 @@
  *   - tools/list
  *   - tools/call mock_list_windows
  *   - tools/call mock_fail (a tool error: result.isError, message kept)
+ *   - registry de-dup (#30): a re-registered tool is listed once, and a
+ *     different tool under a taken name is rejected
  *
  * Runs twice: once speaking the MCP stdio transport (newline-delimited
  * JSON — what Claude Code and every spec-conformant client send), once
@@ -69,6 +71,34 @@ mock_fail(const cJSON *params, void *userdata)
 	cJSON_AddTrueToObject(o, "isError");
 	cJSON_AddStringToObject(o, "error", "unknown behavior 'nope'");
 	return o;
+}
+
+// Same name as MOCK_TOOL, different descriptor: must be rejected (#30).
+static cJSON *
+mock_impostor(const cJSON *params, void *userdata)
+{
+	(void)params;
+	(void)userdata;
+	cJSON *o = cJSON_CreateObject();
+	cJSON_AddStringToObject(o, "name", "impostor");
+	return o;
+}
+
+static const struct mcp_tool MOCK_IMPOSTOR_TOOL = {
+    .name = "mock_list_windows",
+    .description = "Must never be listed or called: the name is already taken.",
+    .input_schema_json = "{\"type\":\"object\"}",
+    .fn = mock_impostor,
+};
+
+static int
+count_substring(const char *haystack, const char *needle)
+{
+	int n = 0;
+	for (const char *p = strstr(haystack, needle); p != NULL; p = strstr(p + 1, needle)) {
+		n++;
+	}
+	return n;
 }
 
 static const struct mcp_tool MOCK_FAIL_TOOL = {
@@ -297,7 +327,16 @@ main(int argc, char **argv)
 
 	// Start the server.
 	setenv("DISPLAYXR_MCP", "1", 1);
-	mcp_server_register_tool(&MOCK_TOOL);
+	// #30: embedders re-register their static tools on every start, so the
+	// same descriptor many times over must stay ONE entry (more than
+	// MAX_TOOLS here: without de-dup the table fills and MOCK_FAIL_TOOL,
+	// registered after, is dropped), and a different descriptor under a
+	// taken name must not displace or shadow the first.
+	for (int i = 0; i < 100; i++) {
+		mcp_server_register_tool(&MOCK_TOOL);
+	}
+	mcp_server_register_tool(&MOCK_IMPOSTOR_TOOL);
+	mcp_server_register_tool(&MOCK_FAIL_TOOL);
 	mcp_server_register_tool(&MOCK_FAIL_TOOL);
 	mcp_server_maybe_start_named("smoke");
 
@@ -350,6 +389,20 @@ main(int argc, char **argv)
 	} else {
 		failures += expect_substring(body, "\"mock_list_windows\"", "tools/list: mock tool present");
 		failures += expect_substring(body, "\"echo\"", "tools/list: built-in echo present");
+		failures += expect_substring(body, "\"mock_fail\"", "tools/list: tool registered after 100 duplicates present");
+		int n = count_substring(body, "\"mock_list_windows\"");
+		if (n != 1) {
+			fprintf(stderr, "FAIL: tools/list: mock_list_windows listed %d times, expected once:\n%s\n", n, body);
+			failures++;
+		} else {
+			printf("  ok: tools/list: re-registered tool listed once\n");
+		}
+		if (strstr(body, "Must never be listed") != NULL) {
+			fprintf(stderr, "FAIL: tools/list: the same-name impostor was registered\n");
+			failures++;
+		} else {
+			printf("  ok: tools/list: same-name impostor rejected\n");
+		}
 		free(body);
 	}
 
@@ -363,6 +416,10 @@ main(int argc, char **argv)
 	} else {
 		failures += expect_substring(body, "\"mock_app\"", "tools/call: returned mock window name");
 		failures += expect_substring(body, "\"id\":42", "tools/call: returned mock window id");
+		if (strstr(body, "impostor") != NULL) {
+			fprintf(stderr, "FAIL: tools/call: dispatched to the same-name impostor\n");
+			failures++;
+		}
 		if (result_is_error(body) != 0) {
 			fprintf(stderr, "FAIL: tools/call: a successful result must not carry isError:\n%s\n", body);
 			failures++;

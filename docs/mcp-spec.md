@@ -230,6 +230,8 @@ Either direction is a multi-month design problem with ecosystem implications. Tr
 
 `mcp_server_register_tool` / `mcp_server_unregister_tool` are legal while the server is running. Any change broadcasts `notifications/tools/list_changed` to every client that has completed `initialize`. The `initialize` response advertises `capabilities.tools.listChanged: true`. This is how late-registered app tools (e.g. a model viewer registering `run_animation` after a model loads) surface without reconnects.
 
+Registration is idempotent (#30). The registry survives `mcp_server_stop()`, and embedders re-register their static tools on every start, so registering a descriptor that is already registered is a silent no-op (no `list_changed`). Registering a *different* descriptor under a name that is already taken is rejected with a warning and the first registration stays; to replace a tool, unregister it first.
+
 ### 10.2 Tool groups
 
 Every tool carries a group, surfaced per tool in `tools/list`:

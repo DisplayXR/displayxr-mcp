@@ -146,6 +146,12 @@ mcp_server_stop(void);
  * When called on a running server with connected clients, broadcasts
  * `notifications/tools/list_changed` so agents pick up the new tool —
  * this is how late-registered app tools (XR_DXR_mcp_tools) surface.
+ *
+ * Idempotent: registering a descriptor that is already registered is a
+ * silent no-op (no notification), so re-registering static tools after
+ * every mcp_server_start() is safe. A different descriptor under a name
+ * that is already registered is rejected with a warning; the first
+ * registration stays. To replace a tool, unregister it first.
  */
 void
 mcp_server_register_tool(const struct mcp_tool *tool);
