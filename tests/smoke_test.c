@@ -13,6 +13,7 @@
  *   - registry de-dup (#30): a re-registered tool is listed once, and a
  *     different tool under a taken name is rejected
  *   - session enumeration skips and prunes a dead PID's socket (#31)
+ *   - the 1:1 bridge exits when the server side closes, stdin still open
  *
  * Runs twice: once speaking the MCP stdio transport (newline-delimited
  * JSON — what Claude Code and every spec-conformant client send), once
@@ -364,6 +365,51 @@ check_stale_socket_pruned(void)
 	return failures;
 }
 
+// The 1:1 bridge must exit when the server side closes, even though the
+// client keeps its stdin open. Stops the server: run last.
+static int
+check_bridge_exits_on_server_close(const char *adapter)
+{
+	printf("--- bridge exits when the server closes ---\n");
+	FILE *out = NULL, *in = NULL;
+	pid_t pid = spawn_adapter(adapter, &out, &in);
+	if (pid <= 0) {
+		mcp_server_stop();
+		return 1;
+	}
+	int failures = 0;
+	char *body = NULL;
+	send_frame(out, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}");
+	if (recv_frame(in, &body) != 0) {
+		fprintf(stderr, "FAIL: bridge close: no initialize response\n");
+		failures++;
+	}
+	free(body);
+
+	mcp_server_stop(); // Aborts the adapter's server connection.
+
+	// stdin (out) deliberately stays open: only the server side closed.
+	bool exited = false;
+	int status = 0;
+	for (int i = 0; i < 100 && !exited; i++) { // up to 5 s
+		exited = waitpid(pid, &status, WNOHANG) == pid;
+		if (!exited) {
+			usleep(50 * 1000);
+		}
+	}
+	if (!exited) {
+		fprintf(stderr, "FAIL: bridge close: adapter still running 5 s after the server closed\n");
+		kill(pid, SIGKILL);
+		waitpid(pid, &status, 0);
+		failures++;
+	} else {
+		printf("  ok: bridge exited after the server closed, stdin still open\n");
+	}
+	fclose(out);
+	fclose(in);
+	return failures;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -524,8 +570,7 @@ main(int argc, char **argv)
 
 	failures += run_ndjson(adapter);
 	failures += check_stale_socket_pruned();
-
-	mcp_server_stop();
+	failures += check_bridge_exits_on_server_close(adapter); // Stops the server.
 
 	if (failures == 0) {
 		printf("=== smoke test PASSED ===\n");
