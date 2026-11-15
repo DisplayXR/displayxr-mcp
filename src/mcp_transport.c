@@ -24,6 +24,7 @@
 
 #ifndef _WIN32
 #include <dirent.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <sys/socket.h>
@@ -48,8 +49,27 @@ mcp_self_pid(void)
 struct mcp_listener
 {
 	int fd;
+	//! Self-pipe: mcp_listener_shutdown() writes a byte to wake[1]; a
+	//! blocked accept polls wake[0] next to fd. Never drained, so every
+	//! later accept returns NULL too.
+	int wake[2];
 	char path[128];
 };
+
+static bool
+set_cloexec_nonblock(int fd, bool nonblock)
+{
+	int fdflags = fcntl(fd, F_GETFD);
+	if (fdflags < 0 || fcntl(fd, F_SETFD, fdflags | FD_CLOEXEC) != 0) {
+		return false;
+	}
+	int fl = fcntl(fd, F_GETFL);
+	if (fl < 0) {
+		return false;
+	}
+	fl = nonblock ? (fl | O_NONBLOCK) : (fl & ~O_NONBLOCK);
+	return fcntl(fd, F_SETFL, fl) == 0;
+}
 
 struct mcp_conn
 {
@@ -155,15 +175,29 @@ listener_open_path(const char *path)
 	l->fd = -1;
 	snprintf(l->path, sizeof(l->path), "%s", path);
 
+	if (pipe(l->wake) != 0) {
+		MCP_LOG_W(LOG_PFX "pipe() failed: %s", strerror(errno));
+		free(l);
+		return NULL;
+	}
+	(void)set_cloexec_nonblock(l->wake[0], true);
+	(void)set_cloexec_nonblock(l->wake[1], true);
+
 	// Always unlink any stale socket; we own the named path.
 	(void)unlink(l->path);
 
 	int fd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (fd < 0) {
 		MCP_LOG_W(LOG_PFX "socket() failed: %s", strerror(errno));
+		close(l->wake[0]);
+		close(l->wake[1]);
 		free(l);
 		return NULL;
 	}
+	// Non-blocking listening socket: accept() runs only after poll()
+	// reported it readable, and a connection reset in between must
+	// return EAGAIN rather than block past a shutdown.
+	(void)set_cloexec_nonblock(fd, true);
 
 	struct sockaddr_un addr = {0};
 	addr.sun_family = AF_UNIX;
@@ -172,6 +206,8 @@ listener_open_path(const char *path)
 	if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
 		MCP_LOG_W(LOG_PFX "bind(%s) failed: %s", l->path, strerror(errno));
 		close(fd);
+		close(l->wake[0]);
+		close(l->wake[1]);
 		free(l);
 		return NULL;
 	}
@@ -182,6 +218,8 @@ listener_open_path(const char *path)
 		MCP_LOG_W(LOG_PFX "chmod(%s, 0600) failed: %s", l->path, strerror(errno));
 		close(fd);
 		(void)unlink(l->path);
+		close(l->wake[0]);
+		close(l->wake[1]);
 		free(l);
 		return NULL;
 	}
@@ -190,6 +228,8 @@ listener_open_path(const char *path)
 		MCP_LOG_W(LOG_PFX "listen() failed: %s", strerror(errno));
 		close(fd);
 		(void)unlink(l->path);
+		close(l->wake[0]);
+		close(l->wake[1]);
 		free(l);
 		return NULL;
 	}
@@ -226,10 +266,36 @@ mcp_listener_accept(struct mcp_listener *listener)
 	}
 	int cfd = -1;
 	for (;;) {
-		cfd = accept(listener->fd, NULL, NULL);
-		if (cfd < 0) {
+		struct pollfd pfd[2] = {
+		    {.fd = listener->fd, .events = POLLIN},
+		    {.fd = listener->wake[0], .events = POLLIN},
+		};
+		int pr = poll(pfd, 2, -1);
+		if (pr < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
 			return NULL;
 		}
+		if (pfd[1].revents != 0) {
+			return NULL; // mcp_listener_shutdown()
+		}
+		if ((pfd[0].revents & POLLIN) == 0) {
+			if ((pfd[0].revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+				return NULL;
+			}
+			continue;
+		}
+		cfd = accept(listener->fd, NULL, NULL);
+		if (cfd < 0) {
+			if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK || errno == ECONNABORTED) {
+				continue;
+			}
+			return NULL;
+		}
+		// BSD/macOS accept() inherits O_NONBLOCK from the listening
+		// socket; connection I/O is blocking (mcp_conn_read/write).
+		(void)set_cloexec_nonblock(cfd, false);
 		if (peer_uid_is_ours(cfd)) {
 			break;
 		}
@@ -245,16 +311,33 @@ mcp_listener_accept(struct mcp_listener *listener)
 }
 
 void
+mcp_listener_shutdown(struct mcp_listener *listener)
+{
+	if (listener == NULL) {
+		return;
+	}
+	// Only touches the wake pipe: the accepting thread may still be
+	// using fd, which mcp_listener_close() closes after the join.
+	char b = 1;
+	ssize_t n;
+	do {
+		n = write(listener->wake[1], &b, 1);
+	} while (n < 0 && errno == EINTR);
+	// EAGAIN = the pipe is already full of wake bytes: already woken.
+}
+
+void
 mcp_listener_close(struct mcp_listener *listener)
 {
 	if (listener == NULL) {
 		return;
 	}
+	mcp_listener_shutdown(listener);
 	if (listener->fd >= 0) {
-		// shutdown() wakes a blocking accept() in the server thread.
-		(void)shutdown(listener->fd, SHUT_RDWR);
 		close(listener->fd);
 	}
+	close(listener->wake[0]);
+	close(listener->wake[1]);
 	(void)unlink(listener->path);
 	free(listener);
 }
@@ -510,7 +593,8 @@ mcp_self_pid(void)
 
 struct mcp_listener
 {
-	HANDLE pipe; //!< The *pending* (not-yet-connected) instance.
+	HANDLE pipe;       //!< The *pending* (not-yet-connected) instance.
+	HANDLE stop_event; //!< Manual-reset; set by mcp_listener_shutdown().
 	char name[128];
 	volatile LONG closed;
 };
@@ -566,9 +650,16 @@ listener_open_pipe_name(const char *name)
 {
 	struct mcp_listener *l = MCP_TYPED_CALLOC(struct mcp_listener);
 	snprintf(l->name, sizeof(l->name), "%s", name);
+	l->stop_event = CreateEventA(NULL, TRUE, FALSE, NULL);
+	if (l->stop_event == NULL) {
+		MCP_LOG_W(LOG_PFX "CreateEvent failed: %lu", GetLastError());
+		free(l);
+		return NULL;
+	}
 	l->pipe = create_pipe_instance(l->name);
 	if (l->pipe == INVALID_HANDLE_VALUE) {
 		MCP_LOG_W(LOG_PFX "CreateNamedPipe(%s) failed: %lu", l->name, GetLastError());
+		CloseHandle(l->stop_event);
 		free(l);
 		return NULL;
 	}
@@ -598,14 +689,18 @@ mcp_listener_open(long pid)
 struct mcp_conn *
 mcp_listener_accept(struct mcp_listener *listener)
 {
-	if (listener == NULL) {
+	if (listener == NULL || listener->pipe == INVALID_HANDLE_VALUE) {
+		return NULL;
+	}
+	if (InterlockedCompareExchange(&listener->closed, 0, 0)) {
 		return NULL;
 	}
 	// The handle is FILE_FLAG_OVERLAPPED, so ConnectNamedPipe must go
 	// through an OVERLAPPED too (passing NULL on an overlapped handle
-	// can misreport completion). Semantics unchanged: blocking accept,
-	// woken by mcp_listener_close's CancelIoEx (wait completes, the
-	// harvest fails with ERROR_OPERATION_ABORTED → NULL).
+	// can misreport completion). Blocking accept, woken by
+	// mcp_listener_shutdown()'s stop event. Unlike a CancelIoEx from the
+	// stopping thread, the event cannot be missed when the shutdown lands
+	// between the closed check above and ConnectNamedPipe below.
 	OVERLAPPED ov = {0};
 	ov.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
 	if (ov.hEvent == NULL) {
@@ -615,9 +710,20 @@ mcp_listener_accept(struct mcp_listener *listener)
 	if (!ok) {
 		DWORD err = GetLastError();
 		if (err == ERROR_IO_PENDING) {
-			WaitForSingleObject(ov.hEvent, INFINITE);
+			HANDLE waits[2] = {ov.hEvent, listener->stop_event};
+			DWORD wr = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
 			DWORD ignored = 0;
-			ok = GetOverlappedResult(listener->pipe, &ov, &ignored, FALSE);
+			if (wr == WAIT_OBJECT_0) {
+				ok = GetOverlappedResult(listener->pipe, &ov, &ignored, FALSE);
+			} else {
+				// Shutdown: cancel the connect and reap it (the OVERLAPPED
+				// lives on this stack) before returning. If a client
+				// connected in the same instant, the instance stays in
+				// listener->pipe and mcp_listener_close() disconnects it.
+				CancelIoEx(listener->pipe, &ov);
+				(void)GetOverlappedResult(listener->pipe, &ov, &ignored, TRUE);
+				ok = FALSE;
+			}
 		} else if (err == ERROR_PIPE_CONNECTED) {
 			ok = TRUE; // Client raced ahead of the accept — already connected.
 		}
@@ -647,26 +753,34 @@ mcp_listener_accept(struct mcp_listener *listener)
 }
 
 void
+mcp_listener_shutdown(struct mcp_listener *listener)
+{
+	if (listener == NULL) {
+		return;
+	}
+	// Wake only. Never touch listener->pipe here: the accepting thread
+	// owns it (accept() swaps in a fresh instance after each connect)
+	// until it has been joined, and a CloseHandle from another thread
+	// would not wake the parked ConnectNamedPipe anyway.
+	InterlockedExchange(&listener->closed, 1);
+	SetEvent(listener->stop_event);
+}
+
+void
 mcp_listener_close(struct mcp_listener *listener)
 {
 	if (listener == NULL) {
 		return;
 	}
-	InterlockedExchange(&listener->closed, 1);
+	mcp_listener_shutdown(listener);
 	if (listener->pipe != INVALID_HANDLE_VALUE) {
-		// The server thread is parked in an overlapped ConnectNamedPipe
-		// wait on this handle. CloseHandle from another thread does
-		// NOT wake it — the kernel keeps the I/O parked and
-		// pthread_join in mcp_server_stop deadlocks. CancelIoEx
-		// cancels any pending I/O on the handle from any thread; the
-		// parked accept's GetOverlappedResult fails with
-		// ERROR_OPERATION_ABORTED and the server thread exits cleanly.
-		// DisconnectNamedPipe alone is a no-op when no client is
-		// connected.
-		CancelIoEx(listener->pipe, NULL);
+		// No accept is in flight any more (the caller joined the
+		// accepting thread). Disconnect drops a client that connected
+		// to the pending instance after the shutdown.
 		DisconnectNamedPipe(listener->pipe);
 		CloseHandle(listener->pipe);
 	}
+	CloseHandle(listener->stop_event);
 	free(listener);
 }
 

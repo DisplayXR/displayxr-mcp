@@ -52,14 +52,24 @@ struct mcp_listener *
 mcp_listener_open_named(const char *role);
 
 /*!
- * Accept one connection. Blocks. Returns NULL when the listener is closed
- * (mcp_listener_close from another thread wakes us via shutdown()).
+ * Accept one connection. Blocks. Returns NULL once the listener has been
+ * shut down (mcp_listener_shutdown from another thread wakes us).
  */
 struct mcp_conn *
 mcp_listener_accept(struct mcp_listener *listener);
 
 /*!
- * Close the listener. Safe to call from another thread to unblock accept().
+ * Wake a thread blocked in mcp_listener_accept() and make every later
+ * accept return NULL. Does NOT free and does not remove the endpoint.
+ * Safe to call from any thread, any number of times.
+ */
+void
+mcp_listener_shutdown(struct mcp_listener *listener);
+
+/*!
+ * Free the listener and remove its endpoint. Must not race an
+ * mcp_listener_accept() on another thread: to stop an accepting thread,
+ * call mcp_listener_shutdown(), join the thread, then close.
  */
 void
 mcp_listener_close(struct mcp_listener *listener);
