@@ -275,15 +275,39 @@ mcp_server_register_tool(const struct mcp_tool *tool)
 	if (tool == NULL || tool->name == NULL || tool->fn == NULL) {
 		return;
 	}
+	// The registry outlives mcp_server_stop(), and embedders re-register
+	// their static tools on every start (the runtime does so per
+	// xrCreateInstance), so registration must be idempotent or the table
+	// fills after a few cycles and later tools are dropped (#30).
+	//   - the same descriptor again: silent no-op, no list_changed;
+	//   - a different descriptor under a taken name: rejected, the first
+	//     registration stays (find_tool already resolved to it).
 	bool added = false;
+	bool name_taken = false;
+	bool already = false;
 	pthread_mutex_lock(&g_server.tools_mutex);
-	if (g_server.tool_count < MAX_TOOLS) {
+	for (size_t i = 0; i < g_server.tool_count; i++) {
+		if (g_server.tools[i] == tool) {
+			already = true;
+			break;
+		}
+		if (strcmp(g_server.tools[i]->name, tool->name) == 0) {
+			name_taken = true;
+			break;
+		}
+	}
+	if (already || name_taken) {
+		// Nothing to add.
+	} else if (g_server.tool_count < MAX_TOOLS) {
 		g_server.tools[g_server.tool_count++] = tool;
 		added = true;
 	} else {
 		MCP_LOG_W(LOG_PFX "tool registry full; dropping '%s'", tool->name);
 	}
 	pthread_mutex_unlock(&g_server.tools_mutex);
+	if (name_taken) {
+		MCP_LOG_W(LOG_PFX "a different tool is already registered as '%s'; keeping the first", tool->name);
+	}
 	if (added) {
 		notify_tools_changed();
 	}
