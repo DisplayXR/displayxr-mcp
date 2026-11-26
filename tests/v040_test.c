@@ -16,7 +16,8 @@
  *      (mockapp__*), hides DIAGNOSTIC tools by default, exposes
  *      CAPTURE, routes tools/call with id rewriting, serves
  *      workspace__list_apps, and relays list_changed on late
- *      registration.
+ *      registration, and still answers a routed call in flight when
+ *      the agent closes stdin right after sending it (#42).
  *
  * Build: -DDISPLAYXR_MCP_BUILD_TESTS=ON. Run: ctest -V.
  */
@@ -111,6 +112,27 @@ static const struct mcp_tool LATE_TOOL = {
     .description = "Registered after clients connected.",
     .input_schema_json = "{\"type\":\"object\"}",
     .fn = mock_late,
+    .group = MCP_TOOL_GROUP_APP,
+};
+
+// Replies after a pause, so the routed call is still in flight when the
+// agent closes stdin (#42).
+static cJSON *
+mock_slow(const cJSON *params, void *userdata)
+{
+	(void)params;
+	(void)userdata;
+	usleep(300 * 1000);
+	cJSON *r = cJSON_CreateObject();
+	cJSON_AddStringToObject(r, "slow", "done");
+	return r;
+}
+
+static const struct mcp_tool SLOW_TOOL = {
+    .name = "slow_tool",
+    .description = "Mock app tool that replies after a pause.",
+    .input_schema_json = "{\"type\":\"object\"}",
+    .fn = mock_slow,
     .group = MCP_TOOL_GROUP_APP,
 };
 
@@ -449,7 +471,29 @@ section_b_aggregator(const char *adapter)
 		}
 	}
 
-	fclose(to);
+	// #42: a routed call sent just before stdin closes is still answered
+	// (the aggregator drains in-flight calls before exiting).
+	{
+		char req[256];
+		int id = next_id++;
+		snprintf(req, sizeof(req),
+		         "{\"jsonrpc\":\"2.0\",\"id\":%d,\"method\":\"tools/call\","
+		         "\"params\":{\"name\":\"mockapp__slow_tool\",\"arguments\":{}}}",
+		         id);
+		send_frame(to, req);
+		fclose(to);
+		char idtok[32];
+		snprintf(idtok, sizeof(idtok), "\"id\":%d", id);
+		bool answered = false;
+		while (recv_frame(from, &r) == 0) {
+			if (strstr(r, idtok) != NULL && strstr(r, "\"slow\"") != NULL) {
+				answered = true;
+			}
+			free(r);
+		}
+		check(answered, "B: in-flight call answered after stdin closed");
+	}
+
 	fclose(from);
 	int status = 0;
 	waitpid(child, &status, 0);
@@ -516,6 +560,7 @@ main(int argc, char **argv)
 	setenv("DISPLAYXR_MCP", "1", 1);
 	mcp_server_register_tool(&PLAY_PAUSE_TOOL);
 	mcp_server_register_tool(&CAPTURE_TOOL);
+	mcp_server_register_tool(&SLOW_TOOL);
 	mcp_server_set_app_id("mockapp");
 	mcp_server_maybe_start();
 	usleep(100 * 1000);
