@@ -17,6 +17,8 @@
 
 #include "displayxr_mcp/mcp_transport.h"
 
+#include <cjson/cJSON.h>
+
 #include <errno.h>
 #include <pthread.h>
 #include <stdbool.h>
@@ -24,6 +26,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
 #include <fcntl.h>
@@ -56,18 +59,77 @@ usage(const char *argv0)
 }
 
 /*!
+ * How long the bridge keeps waiting, after stdin EOF, for the replies to
+ * requests it has already forwarded. Bounds the exit when a server never
+ * answers; a server that closes the connection ends the wait at once.
+ */
+#define DRAIN_TIMEOUT_MS 30000
+
+/*!
  * Which pump finished first. The bridge ends when EITHER side closes:
  * stdin EOF (the client went away) or the server connection closing
  * (the app exited / stopped its server). Waiting on stdin alone left
  * the adapter up, silently, with nothing behind it.
+ *
+ * On stdin EOF the bridge first drains: it waits until every request it
+ * forwarded has had its reply written to stdout (`outstanding` == 0), so
+ * a client that writes its requests and closes stdin straight away
+ * (`echo ... | displayxr-mcp`) still gets every answer.
  */
 struct pump_done
 {
 	pthread_mutex_t mutex;
 	pthread_cond_t cond;
-	bool up_done;   //!< stdin -> conn pump returned.
-	bool down_done; //!< conn -> stdout pump returned.
+	bool up_done;     //!< stdin -> conn pump returned.
+	bool down_done;   //!< conn -> stdout pump returned.
+	long outstanding; //!< Requests forwarded upstream whose reply is not yet on stdout.
 };
+
+/*!
+ * Whether one message body owes, or is, a reply; feeds the drain on
+ * stdin EOF (bodies still pass through unchanged).
+ *
+ * Client -> server: the server answers every JSON object that carries an
+ * id (null included; a missing or bad method gets an "invalid request"
+ * error) and nothing else: no reply to a notification, a batch, or a
+ * body that does not parse (that error carries no id).
+ *
+ * Server -> client: a reply is an object with an id and no method (an
+ * object with both is a server-initiated request).
+ */
+static bool
+owes_reply(const char *body, size_t len)
+{
+	cJSON *root = cJSON_ParseWithLength(body, len);
+	bool r = cJSON_IsObject(root) && cJSON_GetObjectItemCaseSensitive(root, "id") != NULL;
+	cJSON_Delete(root);
+	return r;
+}
+
+static bool
+is_reply(const char *body, size_t len)
+{
+	cJSON *root = cJSON_ParseWithLength(body, len);
+	bool r = cJSON_IsObject(root) && cJSON_GetObjectItemCaseSensitive(root, "id") != NULL &&
+	         !cJSON_IsString(cJSON_GetObjectItemCaseSensitive(root, "method"));
+	cJSON_Delete(root);
+	return r;
+}
+
+static void
+add_outstanding(struct pump_done *done, long delta)
+{
+	if (delta == 0) {
+		return;
+	}
+	pthread_mutex_lock(&done->mutex);
+	done->outstanding += delta;
+	if (done->outstanding < 0) {
+		done->outstanding = 0; // A reply we did not count.
+	}
+	pthread_cond_broadcast(&done->cond);
+	pthread_mutex_unlock(&done->mutex);
+}
 
 // Thread args: pump stdin→conn or conn→stdout.
 struct pump_args
@@ -92,9 +154,13 @@ pump_thread(void *arg)
 				break;
 			}
 			dxr_stdio_framing_latch_set(a->latch, reader.framing);
+			long requests = owes_reply(body, len) ? 1 : 0;
+			// Count before the write: the reply can land before it returns.
+			add_outstanding(a->done, requests);
 			bool ok = dxr_conn_write_frame(a->conn, body, len);
 			free(body);
 			if (!ok) {
+				add_outstanding(a->done, -requests); // Never reached the server.
 				break;
 			}
 		}
@@ -109,6 +175,7 @@ pump_thread(void *arg)
 			// Reply in the framing the client used; blocks until the
 			// client's first message has fixed it.
 			enum dxr_stdio_framing f = dxr_stdio_framing_latch_wait(a->latch);
+			long replies = is_reply(body, len) ? 1 : 0;
 			size_t out_len = 0;
 			char *out = dxr_stdio_encode(f, body, len, &out_len);
 			free(body);
@@ -117,6 +184,8 @@ pump_thread(void *arg)
 			if (!ok) {
 				break;
 			}
+			// Only once the reply is on stdout: the drain may exit right after.
+			add_outstanding(a->done, -replies);
 		}
 	}
 	pthread_mutex_lock(&a->done->mutex);
@@ -308,10 +377,31 @@ main(int argc, char **argv)
 		return 0;
 	}
 
-	// The stdin side ended (client closed stdin): abort the connection so
-	// the conn-side thread unblocks its read. Unblock a writer still
-	// waiting for the framing (client sent nothing) too.
+	// The stdin side ended (client closed stdin). Answer what was already
+	// asked first: wait until every forwarded request has its reply on
+	// stdout, the server closes, or the drain timeout passes.
 	pthread_join(t_up, NULL);
+	struct timespec deadline;
+	(void)timespec_get(&deadline, TIME_UTC); // Portable; see mcp_capture.c.
+	deadline.tv_sec += DRAIN_TIMEOUT_MS / 1000;
+	deadline.tv_nsec += (DRAIN_TIMEOUT_MS % 1000) * 1000000L;
+	if (deadline.tv_nsec >= 1000000000L) {
+		deadline.tv_sec += 1;
+		deadline.tv_nsec -= 1000000000L;
+	}
+	pthread_mutex_lock(&done.mutex);
+	while (done.outstanding > 0 && !done.down_done) {
+		if (pthread_cond_timedwait(&done.cond, &done.mutex, &deadline) != 0) {
+			fprintf(stderr, "displayxr-mcp: stdin closed; %ld repl%s still pending after %d ms, exiting\n",
+			        done.outstanding, done.outstanding == 1 ? "y" : "ies", DRAIN_TIMEOUT_MS);
+			break;
+		}
+	}
+	pthread_mutex_unlock(&done.mutex);
+
+	// Abort the connection so the conn-side thread unblocks its read.
+	// Unblock a writer still waiting for the framing (client sent
+	// nothing) too.
 	dxr_stdio_framing_latch_set(&latch, DXR_STDIO_FRAMING_NDJSON);
 	mcp_conn_abort(conn);
 	pthread_join(t_down, NULL);
