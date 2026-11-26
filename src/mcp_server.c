@@ -32,8 +32,10 @@
 #define MAX_CONNS 8
 #define MAX_FRAME_BYTES (4 * 1024 * 1024)
 
+// Set by CMakeLists.txt from the release tag (cmake/DisplayXRMCPVersion.cmake).
+// No in-source default: a hard-coded one is what went stale (#41).
 #ifndef DISPLAYXR_MCP_VERSION
-#define DISPLAYXR_MCP_VERSION "0.4.0-dev"
+#error "DISPLAYXR_MCP_VERSION must be defined by the build (see CMakeLists.txt)"
 #endif
 
 /*!

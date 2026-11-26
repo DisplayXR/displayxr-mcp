@@ -177,6 +177,29 @@ connect_retry(long pid)
 
 // ---------------------------------------------------------------- 1. cycles
 
+#ifndef DISPLAYXR_MCP_EXPECTED_VERSION
+#error "DISPLAYXR_MCP_EXPECTED_VERSION must be defined by the build (see CMakeLists.txt)"
+#endif
+
+// #41: serverInfo.version is the version this build was made from (the
+// release tag via cmake/DisplayXRMCPVersion.cmake), not a constant that
+// drifts from the release.
+static void
+check_server_version(const char *initialize_reply)
+{
+	cJSON *root = initialize_reply != NULL ? cJSON_Parse(initialize_reply) : NULL;
+	const cJSON *result = cJSON_GetObjectItemCaseSensitive(root, "result");
+	const cJSON *info = cJSON_GetObjectItemCaseSensitive(result, "serverInfo");
+	const cJSON *version = cJSON_GetObjectItemCaseSensitive(info, "version");
+	bool ok = cJSON_IsString(version) && strcmp(version->valuestring, DISPLAYXR_MCP_EXPECTED_VERSION) == 0;
+	if (!ok) {
+		fprintf(stderr, "  serverInfo.version: got '%s', build version '%s'\n",
+		        cJSON_IsString(version) ? version->valuestring : "(missing)", DISPLAYXR_MCP_EXPECTED_VERSION);
+	}
+	check(ok, "initialize: serverInfo.version is the build's version");
+	cJSON_Delete(root);
+}
+
 static void
 one_cycle(int cycle)
 {
@@ -196,6 +219,7 @@ one_cycle(int cycle)
 	                    "{\"protocolVersion\":\"2024-11-05\",\"clientInfo\":{\"name\":\"transport_test\"}}}");
 	check(r != NULL && strstr(r, "\"protocolVersion\"") != NULL && strstr(r, "\"id\":1") != NULL,
 	      "initialize answered");
+	check_server_version(r);
 	free(r);
 	check(send_frame(c, "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}"),
 	      "notifications/initialized sent");

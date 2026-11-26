@@ -3,8 +3,12 @@
 
 cmake_minimum_required(VERSION 3.21)
 
+# The version comes from the release tag (git describe), never from a
+# number in this file: see cmake/DisplayXRMCPVersion.cmake.
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/DisplayXRMCPVersion.cmake)
+
 project(displayxr_mcp
-    VERSION 0.3.2
+    VERSION ${DISPLAYXR_MCP_VERSION_NUMERIC}
     DESCRIPTION "Tiny embeddable MCP (Model Context Protocol) server framework"
     LANGUAGES C)
 
@@ -116,9 +120,10 @@ target_include_directories(displayxr_mcp
 target_link_libraries(displayxr_mcp
     PUBLIC ${DISPLAYXR_MCP_CJSON_TARGET} ${DISPLAYXR_MCP_PTHREAD_TARGET})
 
-# Surfaced in the MCP initialize response (serverInfo.version).
+# Surfaced in the MCP initialize response (serverInfo.version). The full
+# describe string: "X.Y.Z" on a release tag, "X.Y.Z-N-g<sha>" past one.
 target_compile_definitions(displayxr_mcp
-    PRIVATE DISPLAYXR_MCP_VERSION="${PROJECT_VERSION}")
+    PRIVATE DISPLAYXR_MCP_VERSION="${DISPLAYXR_MCP_VERSION_STRING}")
 
 if(WIN32)
     # PIPE_PREFIX uses raw backslashes; nothing platform-specific to link
@@ -142,7 +147,7 @@ if(DISPLAYXR_MCP_BUILD_ADAPTER)
         PREFIX "")
     target_link_libraries(displayxr_mcp_adapter PRIVATE displayxr_mcp)
     target_compile_definitions(displayxr_mcp_adapter
-        PRIVATE DISPLAYXR_MCP_VERSION="${PROJECT_VERSION}")
+        PRIVATE DISPLAYXR_MCP_VERSION="${DISPLAYXR_MCP_VERSION_STRING}")
 endif()
 
 # ---------------------------------------------------------------- tests
@@ -167,8 +172,18 @@ if(DISPLAYXR_MCP_BUILD_TESTS)
     # the only test that exercises the Windows named-pipe transport.
     add_executable(displayxr_mcp_transport tests/transport_test.c)
     target_link_libraries(displayxr_mcp_transport PRIVATE displayxr_mcp)
+    # serverInfo.version must be the build's version (#41).
+    target_compile_definitions(displayxr_mcp_transport
+        PRIVATE DISPLAYXR_MCP_EXPECTED_VERSION="${DISPLAYXR_MCP_VERSION_STRING}")
     add_test(NAME transport COMMAND displayxr_mcp_transport)
     set_tests_properties(transport PROPERTIES TIMEOUT 60)
+
+    # The configured version matches the release tag (#41).
+    add_test(NAME version
+        COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_CURRENT_SOURCE_DIR}
+                -DEXPECTED=${DISPLAYXR_MCP_VERSION_STRING}
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_version.cmake)
+    set_tests_properties(version PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP: ")
 
     # Agent-side stdio framing (ndjson + legacy Content-Length), in-memory.
     add_executable(displayxr_mcp_stdio_framing tests/stdio_framing_test.c adapter/stdio_framing.c)

@@ -76,6 +76,7 @@ env override), the tool conventions, and the named-pipe topology.
 | `include/displayxr_mcp/mcp_log_ring.h` | Bounded log buffer the server exposes via the `tail_log` tool. |
 | `src/` | C implementation of the headers above + `os_compat.c` for pthread / Windows differences. |
 | `adapter/displayxr_mcp.c` | The stdio↔socket adapter binary. `--target <pid:N\|shell>` selects the named pipe to bridge. |
+| `cmake/DisplayXRMCPVersion.cmake` | The one version source: `git describe` of the release tag (archive / no-git fallbacks), read before `project()`. |
 | `external/cjson/` | Vendored cJSON. The framework reuses parent project's `cJSON::cJSON` target if one exists; falls back to this. |
 | `installer/DisplayXRMCPInstaller.nsi` | NSIS installer for the adapter binary + Capabilities registry registration. |
 | `adapter/stdio_framing.c` | Agent-side stdio framing: ndjson (MCP stdio transport) with legacy Content-Length auto-detect; Content-Length frame I/O on the server connection. |
@@ -131,6 +132,18 @@ Manual fallback:
 git tag -a vX.Y.Z -m "release notes ..."
 git push origin vX.Y.Z
 ```
+
+**There is no version number to bump.** The tag is the one source:
+`cmake/DisplayXRMCPVersion.cmake` runs `git describe` before `project()`,
+so `PROJECT_VERSION` (installer names, `Capabilities\MCP\Version`) and
+`serverInfo.version` (in-process server + workspace aggregator) are
+`X.Y.Z` on a tag and `X.Y.Z-N-g<sha>` past one. Consumers that
+FetchContent a tag (runtime, shell) report that tag. A `git archive`
+export reads `cmake/version-archive.txt` (`export-subst`); a plain copy
+with no git metadata reports `0.0.0-unknown`. Never reintroduce a literal
+version in `CMakeLists.txt` or a C default: that is how the in-process
+server reported 0.3.2 for every tag from v0.3.2 through v0.5.7 (#41). The
+`version` ctest checks the configured version against `git describe`.
 
 ### What happens on tag push
 
