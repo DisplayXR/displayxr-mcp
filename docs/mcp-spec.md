@@ -221,6 +221,7 @@ Either direction is a multi-month design problem with ecosystem implications. Tr
 - **v0.1** (private draft) — broad tool surface, no grounding stories, several layer violations.
 - **v0.2** (this doc, §1–§9) — scoped to two driving stories; split into Phase A (handle-app mode, ships first, no service dependency) and Phase B (shell/service mode); deferred app-side and biometric tools with rationale.
 - **v0.3.x** — extraction into this repo; installer + `Capabilities\MCP` registry gate; service endpoint removed (shell + per-PID only).
+  The adapter no longer probes a `service` role in `--target auto` or `--list`, and an explicit `--target service` exits with a message that displayxr-service hosts no MCP endpoint (#40).
 - **v0.4.0** (§10) — dynamic tool registry + `tools/list_changed`, tool groups, app identity, multi-client transport, workspace aggregator. The framework prerequisites for app-defined tools (`XR_DXR_mcp_tools`, runtime-side — §6's Tier-2 question resolved in that direction rather than SDK-side servers).
 - **v0.5.6** (§10.6) — tool errors: a handler result with top-level `"isError": true` is answered as `result.isError: true` with the payload kept, instead of being indistinguishable from success.
 

@@ -38,18 +38,20 @@ usage(const char *argv0)
 {
 	fprintf(stderr,
 	        "usage: %s [--target <auto|workspace|<role>|pid:N>] [--expose-diagnostics] | --pid <N|auto> | --list\n"
-	        "  --target auto      try known roles (shell, service), then unique PID session (default);\n"
+	        "  --target auto      try the shell, then a unique PID session (default);\n"
 	        "                     with no unique session, run as the workspace aggregator\n"
 	        "                     (diagnostics exposed) so apps started later still join\n"
 	        "  --target workspace aggregate the shell + every per-PID app session behind one\n"
 	        "                     MCP connection with <app-id>__<tool> namespacing; membership\n"
 	        "                     mirrors live (apps joining/leaving emit tools/list_changed)\n"
-	        "  --target <role>    attach to a named MCP endpoint (e.g. 'shell', 'service')\n"
+	        "  --target <role>    attach to a named MCP endpoint (e.g. 'shell')\n"
 	        "                     resolves to /tmp/displayxr-mcp-<role>.sock or \\\\.\\pipe\\displayxr-mcp-<role>\n"
 	        "  --target pid:N     attach to a specific in-process server (handle apps)\n"
 	        "  --pid N | auto     back-compat form of --target pid:N / --target auto\n"
 	        "  --expose-diagnostics  (workspace mode) also expose DIAGNOSTIC-group tools\n"
-	        "  --list             print discovered sessions and exit\n",
+	        "  --list             print discovered sessions and exit\n"
+	        "displayxr-service hosts no MCP endpoint: MCP servers run inside each OpenXR app\n"
+	        "process (pid:N) and in the shell, so there is no 'service' target.\n",
 	        argv0);
 }
 
@@ -128,6 +130,25 @@ pump_thread(void *arg)
 	return NULL;
 }
 
+/*!
+ * displayxr-service hosts no MCP endpoint: the servers run inside each
+ * OpenXR app process (per-PID) and in the shell. `service` was a target
+ * before the MCP server moved out of the service; it is never probed
+ * (an endpoint under that name could only be a stale one from an old
+ * install, which the workspace aggregator also refuses). An explicit
+ * `--target service` gets this explanation instead of "cannot connect".
+ */
+static void
+explain_no_service_endpoint(void)
+{
+	fprintf(stderr,
+	        "displayxr-mcp: displayxr-service hosts no MCP endpoint, with or without an app open.\n"
+	        "  MCP servers run inside each OpenXR app process and in the shell.\n"
+	        "  Use --target auto (the shell, else the one running app, else the workspace\n"
+	        "  aggregator), --target workspace (every app, joining as they start),\n"
+	        "  --target pid:N (one app), or --target shell. --list shows what is running.\n");
+}
+
 int
 main(int argc, char **argv)
 {
@@ -171,7 +192,7 @@ main(int argc, char **argv)
 		// cross-platform existence check. Add new roles as the ecosystem
 		// adds them; unknown roles can be enumerated by external tools
 		// inspecting /tmp/displayxr-mcp-*.sock directly.
-		static const char *known_roles[] = {"shell", "service"};
+		static const char *known_roles[] = {"shell"};
 		for (size_t i = 0; i < sizeof(known_roles) / sizeof(known_roles[0]); i++) {
 			struct mcp_conn *probe = mcp_conn_connect_named(known_roles[i]);
 			if (probe != NULL) {
@@ -209,10 +230,10 @@ main(int argc, char **argv)
 		snprintf(buf, sizeof(buf), "pid %ld", pid);
 		connected_label = buf;
 	} else if (strcmp(target_arg, "auto") == 0) {
-		// Try known roles in priority order: shell first (the agent
-		// control surface for spatial workspaces), then service (legacy /
-		// non-shell deployments), then a unique PID session.
-		static const char *roles[] = {"shell", "service"};
+		// Try the shell first (the agent control surface for spatial
+		// workspaces), then a unique PID session. Never `service`: see
+		// explain_no_service_endpoint().
+		static const char *roles[] = {"shell"};
 		for (size_t i = 0; i < sizeof(roles) / sizeof(roles[0]) && conn == NULL; i++) {
 			conn = mcp_conn_connect_named(roles[i]);
 			if (conn != NULL) {
@@ -233,7 +254,7 @@ main(int argc, char **argv)
 				// <app-id>__<tool>. Diagnostics stay exposed, as they are
 				// over a 1:1 pid bridge.
 				fprintf(stderr,
-				        "displayxr-mcp: %zu app sessions and no shell/service endpoint; "
+				        "displayxr-mcp: %zu app sessions and no shell endpoint; "
 				        "serving as the workspace aggregator (apps join as they start)\n",
 				        n);
 				return workspace_aggregator_run(true);
@@ -243,9 +264,12 @@ main(int argc, char **argv)
 			snprintf(buf, sizeof(buf), "pid %ld", pids[0]);
 			connected_label = buf;
 		}
+	} else if (strcmp(target_arg, "service") == 0) {
+		explain_no_service_endpoint();
+		return 1;
 	} else {
-		// Treat any other token as a role name (e.g. "shell", "service",
-		// or a third-party workspace controller's role string).
+		// Treat any other token as a role name (e.g. "shell", or a
+		// third-party workspace controller's role string).
 		conn = mcp_conn_connect_named(target_arg);
 		connected_label = target_arg;
 	}

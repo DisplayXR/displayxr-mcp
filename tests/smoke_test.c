@@ -14,6 +14,7 @@
  *     different tool under a taken name is rejected
  *   - session enumeration skips and prunes a dead PID's socket (#31)
  *   - the 1:1 bridge exits when the server side closes, stdin still open
+ *   - --target service says displayxr-service hosts no MCP endpoint (#40)
  *
  * Runs twice: once speaking the MCP stdio transport (newline-delimited
  * JSON — what Claude Code and every spec-conformant client send), once
@@ -33,6 +34,7 @@
 
 #include <cjson/cJSON.h>
 
+#include <fcntl.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -365,6 +367,53 @@ check_stale_socket_pruned(void)
 	return failures;
 }
 
+// #40: displayxr-service hosts no MCP endpoint. --target service must exit
+// non-zero and say so, not print a bare "cannot connect to service".
+static int
+check_service_target_explains(const char *adapter)
+{
+	printf("--- --target service explains there is no service endpoint ---\n");
+	int err_pipe[2];
+	if (pipe(err_pipe) != 0) {
+		perror("pipe");
+		return 1;
+	}
+	pid_t pid = fork();
+	if (pid == 0) {
+		int devnull = open("/dev/null", O_RDWR);
+		dup2(devnull, STDIN_FILENO);
+		dup2(devnull, STDOUT_FILENO);
+		dup2(err_pipe[1], STDERR_FILENO);
+		close(err_pipe[0]);
+		execl(adapter, adapter, "--target", "service", (char *)NULL);
+		perror("exec");
+		_exit(127);
+	}
+	close(err_pipe[1]);
+	char buf[2048];
+	size_t n = 0;
+	ssize_t r;
+	while (n + 1 < sizeof(buf) && (r = read(err_pipe[0], buf + n, sizeof(buf) - 1 - n)) > 0) {
+		n += (size_t)r;
+	}
+	buf[n] = '\0';
+	close(err_pipe[0]);
+	int status = 0;
+	waitpid(pid, &status, 0);
+
+	int failures = 0;
+	if (!WIFEXITED(status) || WEXITSTATUS(status) != 1) {
+		fprintf(stderr, "FAIL: --target service: expected exit status 1\n");
+		failures++;
+	} else {
+		printf("  ok: --target service exits with status 1\n");
+	}
+	failures += expect_substring(buf, "displayxr-service hosts no MCP endpoint",
+	                             "--target service: says the service hosts no MCP endpoint");
+	failures += expect_substring(buf, "--target pid:N", "--target service: points at the working targets");
+	return failures;
+}
+
 // The 1:1 bridge must exit when the server side closes, even though the
 // client keeps its stdin open. Stops the server: run last.
 static int
@@ -570,6 +619,7 @@ main(int argc, char **argv)
 
 	failures += run_ndjson(adapter);
 	failures += check_stale_socket_pruned();
+	failures += check_service_target_explains(adapter);
 	failures += check_bridge_exits_on_server_close(adapter); // Stops the server.
 
 	if (failures == 0) {
