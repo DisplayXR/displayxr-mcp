@@ -23,7 +23,12 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
+      # Full history + tags: CMake derives the version from `git describe`
+      # (cmake/DisplayXRMCPVersion.cmake), so tag builds report the tag and
+      # PR / main builds report <tag>-N-g<sha>.
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - name: Install ninja (Linux)
         if: matrix.os == 'ubuntu-latest'
@@ -194,74 +199,6 @@ jobs:
         # consumers without a system cJSON will hit (e.g. macOS CI of
         # downstream projects).
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DDISPLAYXR_MCP_USE_VENDORED_CJSON=ON -DDISPLAYXR_MCP_BUILD_TESTS=ON
-
-      # Sync CMakeLists.txt VERSION to the most recent vX.Y.Z tag before
-      # CMake reads it. The installer's OutFile is
-      # `DisplayXRMCPSetup-${VERSION}.${BUILD_NUM}.exe` and VERSION flows
-      # from CMake `project(VERSION ...)` in the in-tree CMakeLists.txt;
-      # without this, source-tree drift between releases produces stale
-      # filenames in PR / main CI artifacts (cf. displayxr-shell-pvt#33).
-      #
-      # `git describe --tags --abbrev=0 --match 'v[0-9]*'` resolves to
-      # the exact tag on tag pushes and the most recent matching tag
-      # otherwise. CI is authoritative; release flow can stop manually
-      # bumping CMakeLists.txt.
-      - name: Sync CMake VERSION from latest vX.Y.Z tag (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          # actions/checkout's default fetch-depth is 1 and skips tags;
-          # pull just the tag refs (no deeper commit history) for describe.
-          git fetch --depth=1 origin '+refs/tags/*:refs/tags/*' 2>$null
-
-          $tag = (git describe --tags --abbrev=0 --match 'v[0-9]*' 2>$null)
-          if (-not $tag) {
-            Write-Host "No vX.Y.Z tag reachable — leaving CMakeLists.txt unchanged"
-            exit 0
-          }
-          if ($tag -notmatch '^v(\d+\.\d+\.\d+)$') {
-            Write-Host "Latest tag '$tag' is not vX.Y.Z — leaving CMakeLists.txt unchanged"
-            exit 0
-          }
-          $ver = $Matches[1]
-          Write-Host "Patching CMakeLists.txt VERSION to $ver (from tag $tag, ref=$env:GITHUB_REF)"
-          $out = Get-Content CMakeLists.txt | ForEach-Object {
-            if ($_ -match '^(\s*)VERSION\s+\d+\.\d+\.\d+(\s*)$') {
-              "$($Matches[1])VERSION $ver$($Matches[2])"
-            } else {
-              $_
-            }
-          }
-          Set-Content -Path CMakeLists.txt -Value $out -Encoding UTF8
-          Select-String -Path CMakeLists.txt -Pattern '^\s*VERSION\s+\d+\.\d+\.\d+\s*$' | Select-Object -First 1
-
-      # macOS parallel of the Windows sync step above. The .pkg filename
-      # is `DisplayXRMCP-${PROJECT_VERSION}.pkg` so the same drift hazard
-      # applies — without this, tag-push builds attach a stale-versioned
-      # .pkg to the GitHub Release.
-      - name: Sync CMake VERSION from latest vX.Y.Z tag (macOS)
-        if: matrix.os == 'macos-latest'
-        run: |
-          set -euo pipefail
-          # actions/checkout default fetch-depth=1 skips tags — pull
-          # just the tag refs.
-          git fetch --depth=1 origin '+refs/tags/*:refs/tags/*' 2>/dev/null || true
-
-          tag=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)
-          if [ -z "$tag" ]; then
-            echo "No vX.Y.Z tag reachable — leaving CMakeLists.txt unchanged"
-            exit 0
-          fi
-          if ! [[ "$tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
-            echo "Latest tag '$tag' is not vX.Y.Z — leaving CMakeLists.txt unchanged"
-            exit 0
-          fi
-          ver="${BASH_REMATCH[1]}"
-          echo "Patching CMakeLists.txt VERSION to $ver (from tag $tag, ref=$GITHUB_REF)"
-          # macOS sed needs `-i ''` for in-place. Match the same line shape
-          # as the pwsh regex above: `<indent>VERSION X.Y.Z<trailing>`.
-          sed -i '' -E "s/^([[:space:]]*)VERSION[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+([[:space:]]*)$/\1VERSION ${ver}\2/" CMakeLists.txt
-          grep -nE '^[[:space:]]*VERSION[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$' CMakeLists.txt | head -1
 
       - name: Configure (macOS)
         if: matrix.os == 'macos-latest'

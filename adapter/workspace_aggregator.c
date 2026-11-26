@@ -53,8 +53,10 @@
 #endif
 #endif
 
+// Set by CMakeLists.txt from the release tag (cmake/DisplayXRMCPVersion.cmake).
+// No in-source default: a hard-coded one is what went stale (#41).
 #ifndef DISPLAYXR_MCP_VERSION
-#define DISPLAYXR_MCP_VERSION "0.4.0-dev"
+#error "DISPLAYXR_MCP_VERSION must be defined by the build (see CMakeLists.txt)"
 #endif
 
 #define MAX_BACKENDS 32
