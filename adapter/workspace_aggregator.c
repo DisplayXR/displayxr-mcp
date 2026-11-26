@@ -40,6 +40,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -64,6 +65,8 @@
 #define MAX_PREFIXES 128
 #define POLL_INTERVAL_MS 1000
 #define NS_SEP "__"
+//! After stdin EOF, how long to wait for replies to calls still in flight.
+#define DRAIN_TIMEOUT_MS 30000
 
 // ---------------------------------------------------------------- state
 
@@ -120,6 +123,12 @@ static struct
 	bool shell_connecting;
 
 	pthread_mutex_t stdout_mutex;
+
+	//! Forwarded agent calls whose reply (result or error) is not yet on
+	//! stdout. Guarded by g.lock; drain_cond signals each decrement, so
+	//! stdin EOF can wait for the answers before the process exits.
+	int agent_pending;
+	pthread_cond_t drain_cond;
 
 	//! Agent-side framing, fixed by the first stdin message.
 	struct dxr_stdio_framing_latch framing;
@@ -399,6 +408,17 @@ inflight_release(struct inflight *fl)
 	memset(fl, 0, sizeof(*fl));
 }
 
+// Caller holds g.lock. One forwarded agent call has been answered on
+// stdout (or will never be).
+static void
+agent_reply_done_locked(void)
+{
+	if (g.agent_pending > 0) {
+		g.agent_pending--;
+	}
+	pthread_cond_broadcast(&g.drain_cond);
+}
+
 // ---------------------------------------------------------------- exposure
 
 /*!
@@ -494,6 +514,7 @@ backend_teardown_locked(int idx)
 			                              "backend exited with the call in flight");
 			write_frame_stdout(err);
 			free(err);
+			agent_reply_done_locked();
 		}
 		inflight_release(fl);
 	}
@@ -660,6 +681,11 @@ backend_reader(void *arg)
 
 			if (fl_backend != idx) {
 				// Unknown or cross-wired id; drop.
+				if (fl != NULL && kind == INFLIGHT_AGENT) {
+					pthread_mutex_lock(&g.lock);
+					agent_reply_done_locked(); // Released above; no reply will come.
+					pthread_mutex_unlock(&g.lock);
+				}
 				if (orig_id != NULL) {
 					cJSON_Delete(orig_id);
 				}
@@ -686,6 +712,11 @@ backend_reader(void *arg)
 				write_frame_stdout(out);
 				free(out);
 			}
+			// Only once the reply is on stdout: the stdin-EOF drain may
+			// exit the process right after.
+			pthread_mutex_lock(&g.lock);
+			agent_reply_done_locked();
+			pthread_mutex_unlock(&g.lock);
 			continue;
 		}
 
@@ -1121,6 +1152,7 @@ handle_tools_call(const cJSON *id, const cJSON *params)
 		return;
 	}
 	uint64_t local_id = fl->local_id;
+	g.agent_pending++;
 
 	// Rebuild the request with the bare tool name + our local id.
 	cJSON *fwd = cJSON_CreateObject();
@@ -1146,6 +1178,9 @@ handle_tools_call(const cJSON *id, const cJSON *params)
 		char *err = jsonrpc_error_str(id, -32000, "backend write failed");
 		write_frame_stdout(err);
 		free(err);
+		pthread_mutex_lock(&g.lock);
+		agent_reply_done_locked();
+		pthread_mutex_unlock(&g.lock);
 	}
 	// Otherwise the response is relayed asynchronously by the reader.
 }
@@ -1216,6 +1251,7 @@ workspace_aggregator_run(bool expose_diagnostics)
 {
 	pthread_mutex_init(&g.lock, NULL);
 	pthread_mutex_init(&g.stdout_mutex, NULL);
+	pthread_cond_init(&g.drain_cond, NULL);
 	dxr_stdio_framing_latch_init(&g.framing);
 	g.expose_diagnostics = expose_diagnostics;
 	// Never assigned to an app: "shell" is the shell's fixed prefix and
@@ -1245,10 +1281,29 @@ workspace_aggregator_run(bool expose_diagnostics)
 	}
 	dxr_stdio_reader_fini(&reader);
 
-	// Stdin closed: abort backends so their readers unwind, then exit.
-	// Process teardown reclaims the rest; no graceful drain needed for
-	// a CLI adapter.
+	// Stdin closed. Requests answered here were written synchronously;
+	// forwarded tools/call replies arrive on backend reader threads, so
+	// wait for those (a backend that dies answers with an error) before
+	// exiting, bounded by DRAIN_TIMEOUT_MS.
+	struct timespec deadline;
+	(void)timespec_get(&deadline, TIME_UTC); // Portable; see mcp_capture.c.
+	deadline.tv_sec += DRAIN_TIMEOUT_MS / 1000;
+	deadline.tv_nsec += (DRAIN_TIMEOUT_MS % 1000) * 1000000L;
+	if (deadline.tv_nsec >= 1000000000L) {
+		deadline.tv_sec += 1;
+		deadline.tv_nsec -= 1000000000L;
+	}
 	pthread_mutex_lock(&g.lock);
+	while (g.agent_pending > 0) {
+		if (pthread_cond_timedwait(&g.drain_cond, &g.lock, &deadline) != 0) {
+			fprintf(stderr, "displayxr-mcp: stdin closed; %d call(s) still pending after %d ms, exiting\n",
+			        g.agent_pending, DRAIN_TIMEOUT_MS);
+			break;
+		}
+	}
+
+	// Abort backends so their readers unwind, then exit. Process
+	// teardown reclaims the rest.
 	for (int i = 0; i < MAX_BACKENDS; i++) {
 		if (g.backends[i].used && g.backends[i].conn != NULL) {
 			mcp_conn_abort(g.backends[i].conn);

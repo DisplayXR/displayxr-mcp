@@ -15,6 +15,8 @@
  *   - session enumeration skips and prunes a dead PID's socket (#31)
  *   - the 1:1 bridge exits when the server side closes, stdin still open
  *   - --target service says displayxr-service hosts no MCP endpoint (#40)
+ *   - stdin closed right after the requests (#42): the bridge still
+ *     answers every request it read before exiting
  *
  * Runs twice: once speaking the MCP stdio transport (newline-delimited
  * JSON — what Claude Code and every spec-conformant client send), once
@@ -95,6 +97,26 @@ static const struct mcp_tool MOCK_IMPOSTOR_TOOL = {
     .description = "Must never be listed or called: the name is already taken.",
     .input_schema_json = "{\"type\":\"object\"}",
     .fn = mock_impostor,
+};
+
+// Answers after a pause, so its reply is still in flight when the client
+// closes stdin (#42).
+static cJSON *
+mock_slow(const cJSON *params, void *userdata)
+{
+	(void)params;
+	(void)userdata;
+	usleep(300 * 1000);
+	cJSON *o = cJSON_CreateObject();
+	cJSON_AddStringToObject(o, "slow", "done");
+	return o;
+}
+
+static const struct mcp_tool MOCK_SLOW_TOOL = {
+    .name = "mock_slow",
+    .description = "Smoke-test stand-in. Replies after a short pause.",
+    .input_schema_json = "{\"type\":\"object\"}",
+    .fn = mock_slow,
 };
 
 static int
@@ -414,6 +436,63 @@ check_service_target_explains(const char *adapter)
 	return failures;
 }
 
+// #42: a client that writes its requests and closes stdin straight away
+// (`printf ... | displayxr-mcp`) must still get every reply: the bridge
+// drains the replies to the requests it read, then exits.
+static int
+check_replies_after_stdin_close(const char *adapter)
+{
+	printf("--- stdin closed right after the requests ---\n");
+	FILE *out = NULL, *in = NULL;
+	pid_t pid = spawn_adapter(adapter, &out, &in);
+	if (pid <= 0) {
+		return 1;
+	}
+	fputs("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n"
+	      "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n"
+	      "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n"
+	      "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\","
+	      "\"params\":{\"name\":\"mock_slow\",\"arguments\":{}}}\n",
+	      out);
+	fclose(out); // EOF on the adapter's stdin, before any reply is read.
+
+	bool got[4] = {false, false, false, false};
+	char *line = NULL;
+	while (recv_line(in, &line) == 0) {
+		for (int id = 1; id <= 3; id++) {
+			char tok[16];
+			snprintf(tok, sizeof(tok), "\"id\":%d", id);
+			if (strstr(line, tok) != NULL) {
+				got[id] = true;
+			}
+		}
+		if (strstr(line, "\"id\":3") != NULL && strstr(line, "done") == NULL) {
+			fprintf(stderr, "FAIL: stdin close: tools/call reply lacks the tool result:\n%s\n", line);
+			got[3] = false;
+		}
+		free(line);
+	}
+	fclose(in);
+	int status = 0;
+	waitpid(pid, &status, 0);
+
+	int failures = 0;
+	const char *what[4] = {NULL, "initialize", "tools/list", "tools/call (slow tool)"};
+	for (int id = 1; id <= 3; id++) {
+		if (!got[id]) {
+			fprintf(stderr, "FAIL: stdin close: no %s reply before the adapter exited\n", what[id]);
+			failures++;
+		} else {
+			printf("  ok: stdin close: %s answered before exit\n", what[id]);
+		}
+	}
+	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+		fprintf(stderr, "FAIL: stdin close: adapter did not exit cleanly (status %d)\n", status);
+		failures++;
+	}
+	return failures;
+}
+
 // The 1:1 bridge must exit when the server side closes, even though the
 // client keeps its stdin open. Stops the server: run last.
 static int
@@ -483,6 +562,7 @@ main(int argc, char **argv)
 	mcp_server_register_tool(&MOCK_IMPOSTOR_TOOL);
 	mcp_server_register_tool(&MOCK_FAIL_TOOL);
 	mcp_server_register_tool(&MOCK_FAIL_TOOL);
+	mcp_server_register_tool(&MOCK_SLOW_TOOL);
 	mcp_server_maybe_start_named("smoke");
 
 	// Give the server thread a beat to bind.
@@ -618,6 +698,7 @@ main(int argc, char **argv)
 	waitpid(pid, &status, 0);
 
 	failures += run_ndjson(adapter);
+	failures += check_replies_after_stdin_close(adapter);
 	failures += check_stale_socket_pruned();
 	failures += check_service_target_explains(adapter);
 	failures += check_bridge_exits_on_server_close(adapter); // Stops the server.
